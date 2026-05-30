@@ -1,4 +1,6 @@
-// Typed client for the FastAPI read API (proxied at /api in dev).
+// Typed client for the FastAPI read API, always under "/api". In dev the Vite
+// server proxies "/api" to the backend; in production the served app mounts the
+// API at "/api" and serves this SPA at the root — same origin, no CORS.
 const BASE = "/api";
 
 async function get<T>(path: string, params?: Record<string, unknown>): Promise<T> {

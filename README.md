@@ -74,12 +74,19 @@ Requirements it installs for you (Debian/Ubuntu): **Python 3.11+**, **Node 18+**
 ## Running
 
 ```bash
-# Backend read API (http://localhost:8000)
-uvicorn fpl_engine.api.app:app --reload --port 8000
+# Production: whole app (UI + API) on all interfaces, one process.
+# `served_app` serves the built frontend at / and the API under /api.
+uvicorn fpl_engine.api.app:served_app --host 0.0.0.0 --port 8000
+#   -> http://<host>:8000
 
-# Frontend dev server (http://localhost:5173, proxies /api -> :8000)
-cd frontend && npm run dev
+# Development (frontend hot-reload): API + Vite dev server separately.
+uvicorn fpl_engine.api.app:app --host 0.0.0.0 --port 8000   # API at root, /api proxied
+cd frontend && npm run dev -- --host                         # UI on 0.0.0.0:5173
 ```
+
+`served_app` requires the frontend to be built (`cd frontend && npm run build`,
+which `install.sh` does). Bind to `0.0.0.0` (default in the systemd unit) to reach
+it from other machines; use `127.0.0.1` to keep it local.
 
 ### Automatic refresh (hands-off)
 

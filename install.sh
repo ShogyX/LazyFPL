@@ -204,7 +204,7 @@ WantedBy=${5:-default.target}
 EOF
 }
 write_unit deploy/lazyfpl-scheduler.service "LazyFPL scheduler (auto data + prediction refresh)" "$FPL_BIN schedule" system multi-user.target
-write_unit deploy/lazyfpl-api.service "LazyFPL read API" "$UVICORN_BIN fpl_engine.api.app:app --host 0.0.0.0 --port 8000" system multi-user.target
+write_unit deploy/lazyfpl-api.service "LazyFPL app (UI + API)" "$UVICORN_BIN fpl_engine.api.app:served_app --host 0.0.0.0 --port 8000" system multi-user.target
 
 if [ "$WITH_SCHEDULER" -eq 1 ]; then
   if command -v systemctl >/dev/null 2>&1 && [ "$CAN_ELEVATE" -eq 1 ] && systemctl >/dev/null 2>&1; then
@@ -225,9 +225,13 @@ cat <<EOF
 Done. To run manually (if you didn't use --with-scheduler):
 
   source .venv/bin/activate
-  uvicorn fpl_engine.api.app:app --port 8000      # API   -> http://localhost:8000
-  cd frontend && npm run dev                        # UI    -> http://localhost:5173
+  # Whole app (UI + API) on all interfaces, port 8000:
+  uvicorn fpl_engine.api.app:served_app --host 0.0.0.0 --port 8000
   fpl schedule                                      # auto data + prediction refresh
+
+  # Or, for frontend hot-reload during development (UI on :5173, API on :8000):
+  uvicorn fpl_engine.api.app:app --host 0.0.0.0 --port 8000
+  cd frontend && npm run dev -- --host
 
 First data load: the scheduler fills predictions within a gameweek cycle, or run
 'fpl refresh' once now. Edit .env for optional API keys / notifications.

@@ -7,7 +7,10 @@ engine's output end-to-end. Read-only; queries the NORMALISED/SERVING tables.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, or_, select
 
 from ..db.engine import get_sessionmaker
@@ -410,6 +413,37 @@ def create_app() -> FastAPI:
     return app
 
 
+def _frontend_dist() -> Path:
+    return Path(__file__).resolve().parents[3] / "frontend" / "dist"
+
+
+def create_served_app() -> FastAPI:
+    """Production single-origin app: the read API mounted under ``/api`` plus the
+    built React SPA served at the root (with client-side routing fallback).
+
+    One uvicorn process on 0.0.0.0 then serves the whole app — no separate web
+    server, no CORS. Falls back to the bare API if the frontend isn't built.
+    The frontend calls ``/api/*`` (see ``frontend/src/lib/api.ts``), so the API
+    and SPA never collide on shared paths like ``/settings`` or ``/planner``.
+    """
+    api = create_app()
+    dist = _frontend_dist()
+    if not (dist / "index.html").is_file():
+        return api
+
+    served = FastAPI(title="FPL Intelligence Engine", version="1.0")
+    served.mount("/api", api)
+
+    @served.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str):
+        target = (dist / full_path).resolve()
+        if full_path and dist in target.parents and target.is_file():
+            return FileResponse(target)
+        return FileResponse(dist / "index.html")
+
+    return served
+
+
 def _f(v) -> float | None:
     return float(v) if v is not None else None
 
@@ -432,4 +466,8 @@ def _player_meta(sm, ids: list[int]) -> dict[int, tuple[int | None, str | None]]
     return {int(r.id): (r.code, r.short_name) for r in rows}
 
 
+# `app` is the bare read API (routes at root) — used in dev behind the Vite proxy
+# and by the test suite. `served_app` adds the SPA at root with the API under
+# /api for a single-origin production deploy.
 app = create_app()
+served_app = create_served_app()
