@@ -119,6 +119,37 @@ returned in plaintext. Stored secrets override env values.
 Secrets are typed `SecretStr` and scrubbed from logs. **Never commit `.env`.** See
 [`SECURITY.md`](SECURITY.md).
 
+## Data sources
+
+Only the **official FPL API is required**, and it needs no key. Everything else is
+optional enrichment.
+
+| Source | Key? | Used for | Coverage |
+|---|---|---|---|
+| [Official FPL API](https://fantasy.premierleague.com/api) | none | live prices, status/news, fixtures, current-season per-match stats, your team | **current season only** |
+| [vaastav/Fantasy-Premier-League](https://github.com/vaastav/Fantasy-Premier-League) | none | historical per-GW match data for training & backtests | **10 seasons (2016‑17 →)** |
+| [Understat](https://understat.com) | none | advanced xG / npxG / shot data (optional) | 2014‑15 → |
+| [FBref](https://fbref.com) | none | creation / progression / defensive actions (optional) | recent seasons |
+| [ClubElo](http://clubelo.com) | none | team Elo ratings (optional) | long history |
+| [API-Football](https://www.api-football.com) | free key | lineups / injuries / referees (optional) | current |
+
+> **Why both the FPL API and vaastav?** vaastav's data is itself scraped from the
+> FPL API, so for the *current* season the depth and accuracy are identical. The
+> official API, however, only exposes the **current** season — it has no historical
+> endpoint — whereas vaastav archives 10 seasons of merged per-gameweek data. The
+> engine therefore reads live state from the FPL API and historical/per-match data
+> from vaastav; dropping vaastav would lose all multi-season training and backtest
+> coverage. The bookmaker/odds providers are intentionally **iced**.
+
+### Software dependencies
+
+Backend (see [`pyproject.toml`](pyproject.toml)): SQLAlchemy, Alembic, psycopg2,
+Pydantic / pydantic-settings, httpx, APScheduler, NumPy, SciPy, scikit-learn,
+pandas, PuLP (CBC solver), FastAPI, Uvicorn.
+
+Frontend (see [`frontend/package.json`](frontend/package.json)): React, Vite,
+TypeScript, Tailwind CSS, Recharts, lucide-react, React Router, TanStack Query.
+
 ## Testing
 
 ```bash
@@ -129,6 +160,22 @@ cd frontend && npm run build    # frontend type-check + build
 CI runs the backend suite against a Postgres service container and type-checks /
 builds the frontend on every push and PR (`.github/workflows/ci.yml`). Security
 scanning (CodeQL + dependency audit) runs in `.github/workflows/security.yml`.
+
+## Acknowledgements
+
+This project stands on data generously maintained by others:
+
+- **[vaastav/Fantasy-Premier-League](https://github.com/vaastav/Fantasy-Premier-League)**
+  — the historical per-gameweek FPL dataset that makes multi-season training and
+  backtesting possible. The engine's history layer is built directly on it; huge
+  thanks to [@vaastav](https://github.com/vaastav) and its contributors.
+- **[Understat](https://understat.com)** and **[FBref](https://fbref.com)** — advanced
+  expected-goals and player-action data.
+- **[ClubElo](http://clubelo.com)** — team strength ratings.
+- The **official Fantasy Premier League API** — live game state.
+
+Please respect each source's terms of use and rate limits (the ingest layer
+self-rate-limits accordingly).
 
 ## License
 
