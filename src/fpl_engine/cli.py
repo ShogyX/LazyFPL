@@ -459,6 +459,49 @@ def cmd_freeze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bootstrap(args: argparse.Namespace) -> int:
+    """One-time setup for a fresh install: acquire all historical seasons,
+    resolve identities, build facts/DC/targets/feature panel, run the predictive
+    study, freeze the model, then produce current-GW predictions. Idempotent and
+    resilient (a failed stage is logged and skipped). Needs internet; can take
+    10-30+ minutes for all seasons."""
+    from .store.dc import DcReconstructor
+
+    fetch = FetchClient()
+    steps: list[dict] = []
+
+    def step(name, fn):
+        log.info("bootstrap: starting", extra={"step": name})
+        try:
+            fn()
+            steps.append({"step": name, "status": "ok"})
+            log.info("bootstrap: done", extra={"step": name})
+        except Exception as exc:  # keep going; report at the end
+            steps.append({"step": name, "status": f"FAILED: {exc}"})
+            log.warning("bootstrap: step failed", extra={"step": name, "error": str(exc)})
+
+    try:
+        v = VaastavIngestor(fetch)
+        fb = FactBuilder(v)
+        step("acquire_history", lambda: v.acquire(seasons=None))
+        step("crosswalk", lambda: CrosswalkBuilder(v).build_fpl(seasons=None))
+        step("facts", lambda: (fb.build_player_match_stats(None), fb.build_team_match_stats(None)))
+        step("defensive_contribution", lambda: DcReconstructor().build(seasons=None))
+        step("targets", lambda: TargetBuilder().build(seasons=None))
+        step("feature_panel", lambda: PanelBuilder().build(seasons=None))
+        step("study", lambda: PredictiveValidityStudy(study_version=args.study_version)
+             .run(positions=(1, 2, 3, 4), seasons=None))
+        step("freeze_model", lambda: WeightFreezer(study_version=args.study_version,
+             registry_version=args.version).freeze(holdout_season=None))
+        step("refresh_predictions", lambda: refresh_predictions(fetch, version=args.version))
+    finally:
+        fetch.close()
+
+    ok = all(s["status"] == "ok" for s in steps)
+    print(json.dumps({"bootstrap": steps, "ok": ok}, indent=2, default=str))
+    return 0 if ok else 1
+
+
 def cmd_predict(args: argparse.Namespace) -> int:
     if args.component:
         from .model.components import ComponentPredictor
@@ -912,6 +955,11 @@ def build_parser() -> argparse.ArgumentParser:
     rf.add_argument("--version", default="v1")
     rf.add_argument("--horizon", type=int, default=6, help="predict the next N GWs")
     rf.set_defaults(fn=cmd_refresh)
+
+    bs = sub.add_parser("bootstrap", help="one-time setup: backfill all history, train + freeze the model, then predict")
+    bs.add_argument("--version", default="v1", help="model_registry version to freeze")
+    bs.add_argument("--study-version", default="v1-dev")
+    bs.set_defaults(fn=cmd_bootstrap)
 
     fe = sub.add_parser("freeze-ensemble", help="freeze an ensemble as a versioned model")
     fe.add_argument("--version", default="v2")

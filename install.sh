@@ -15,15 +15,20 @@ REPO_DIR="$(pwd)"
 
 WITH_SCHEDULER=0
 NO_SYSTEM_DEPS=0
+BOOTSTRAP=auto      # auto = run only if no v1 model yet; on = force; off = skip
 for arg in "$@"; do
   case "$arg" in
     --with-scheduler) WITH_SCHEDULER=1 ;;
     --no-system-deps) NO_SYSTEM_DEPS=1 ;;
+    --bootstrap)      BOOTSTRAP=on ;;
+    --no-bootstrap)   BOOTSTRAP=off ;;
     -h|--help)
       cat <<'USAGE'
-Usage: ./install.sh [--with-scheduler] [--no-system-deps]
+Usage: ./install.sh [--with-scheduler] [--no-system-deps] [--bootstrap|--no-bootstrap]
   --with-scheduler   install & enable the auto-refresh + API services
   --no-system-deps   skip apt/PostgreSQL/Node provisioning (use what's installed)
+  --bootstrap        force the one-time history backfill + model training
+  --no-bootstrap     skip it (default runs it automatically only when no model exists)
 USAGE
       exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
@@ -164,10 +169,38 @@ else
 fi
 
 # --- migrations -------------------------------------------------------------
+MIGRATED=0
 if alembic upgrade head >/dev/null 2>&1; then
   info "Applied database migrations (alembic upgrade head)"
+  MIGRATED=1
 else
   warn "Migrations failed — check PostgreSQL is running and FPL_DATABASE_URL in .env, then: alembic upgrade head"
+fi
+
+# --- one-time history backfill + model training (background) ----------------
+# The scheduler keeps the CURRENT season fresh, but a fresh DB has no historical
+# data and no trained model, so the app would be empty. Run `fpl bootstrap` once
+# (acquire all seasons -> features -> study -> freeze v1 -> predict). It's heavy
+# (10-30+ min) so we launch it in the background and log to bootstrap.log.
+if [ "$MIGRATED" -eq 1 ] && [ "$BOOTSTRAP" != "off" ]; then
+  HAVE_MODEL="$(python - <<'PY' 2>/dev/null || echo 0
+from sqlalchemy import create_engine, text
+from fpl_engine.config import get_settings
+try:
+    e = create_engine(get_settings().database_url)
+    with e.connect() as c:
+        print(c.execute(text("select count(*) from study.model_registry where version='v1'")).scalar())
+except Exception:
+    print(0)
+PY
+)"
+  if [ "$BOOTSTRAP" = "on" ] || [ "${HAVE_MODEL:-0}" = "0" ]; then
+    info "Starting one-time history backfill + model training in the background -> bootstrap.log"
+    nohup "$REPO_DIR/.venv/bin/fpl" bootstrap >>"$REPO_DIR/bootstrap.log" 2>&1 &
+    info "Backfill running (10-30+ min). Watch it: tail -f $REPO_DIR/bootstrap.log"
+  else
+    info "Model already trained (study.model_registry has v1) — skipping bootstrap."
+  fi
 fi
 
 # --- frontend ---------------------------------------------------------------

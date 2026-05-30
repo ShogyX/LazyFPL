@@ -131,15 +131,33 @@ function IntegrationsCard({ data }: { data: SettingsPayload }) {
   const [email, setEmail] = useState(g.notify_email);
   const [push, setPush] = useState(g.notify_push);
   const [evThreshold, setEvThreshold] = useState(g.ev_threshold);
+  const [smtpHost, setSmtpHost] = useState(g.smtp_host ?? "");
+  const [smtpPort, setSmtpPort] = useState(g.smtp_port);
+  const [smtpFrom, setSmtpFrom] = useState(g.smtp_from ?? "");
+  const [smtpTo, setSmtpTo] = useState(g.smtp_to ?? "");
   return (
     <Card title="Integrations">
       <div className="grid gap-3">
-        <Toggle label="Email notifications" hint="Requires SMTP credentials below." checked={email} onChange={setEmail} />
+        <Toggle label="Email notifications" hint="Requires SMTP host, sender, recipient + credentials." checked={email} onChange={setEmail} />
         <Toggle label="Push notifications" hint="Requires Pushover token + user below." checked={push} onChange={setPush} />
         <Field label="Notify EV threshold (pts uplift)">
           <TextInput type="number" step="0.1" value={evThreshold} onChange={(e) => setEvThreshold(Number(e.target.value))} />
         </Field>
-        <SaveButton save={save} onClick={() => save.mutate({ notify_email: email, notify_push: push, ev_threshold: evThreshold })} />
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="SMTP host"><TextInput placeholder="smtp.gmail.com" value={smtpHost} onChange={(e) => setSmtpHost(e.target.value)} /></Field>
+          <Field label="SMTP port"><TextInput type="number" value={smtpPort} onChange={(e) => setSmtpPort(Number(e.target.value))} /></Field>
+        </div>
+        <Field label="Sender email (From)">
+          <TextInput type="email" placeholder="alerts@example.com" value={smtpFrom} onChange={(e) => setSmtpFrom(e.target.value)} />
+        </Field>
+        <Field label="Recipient email (To)" hint="Where email alerts are delivered — required for email.">
+          <TextInput type="email" placeholder="you@example.com" value={smtpTo} onChange={(e) => setSmtpTo(e.target.value)} />
+        </Field>
+        <SaveButton save={save} onClick={() => save.mutate({
+          notify_email: email, notify_push: push, ev_threshold: evThreshold,
+          smtp_host: smtpHost || null, smtp_port: smtpPort,
+          smtp_from: smtpFrom || null, smtp_to: smtpTo || null,
+        })} />
       </div>
     </Card>
   );

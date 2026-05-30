@@ -64,8 +64,16 @@ migrations, builds the frontend, and (with `--with-scheduler`) installs and star
 the auto-refresh + API systemd services. Run it as **root or with sudo** so it can
 install system packages. It's idempotent — safe to re-run.
 
+On a fresh database it also kicks off a **one-time history backfill + model
+training** in the background (`fpl bootstrap`: acquire all seasons → features →
+study → freeze the model → predict), logged to `bootstrap.log` — this is what
+gives the app historical data and a trained model to serve (takes 10–30+ min;
+watch with `tail -f bootstrap.log`). The scheduler then keeps the current season
+fresh automatically.
+
 Flags: `--with-scheduler` (install & start services), `--no-system-deps` (skip
-apt/PostgreSQL/Node provisioning and use what's already installed).
+apt/PostgreSQL/Node provisioning), `--bootstrap` / `--no-bootstrap` (force/skip
+the one-time backfill).
 
 Requirements it installs for you (Debian/Ubuntu): **Python 3.11+**, **Node 18+**,
 **PostgreSQL**. On other systems install those yourself, then run

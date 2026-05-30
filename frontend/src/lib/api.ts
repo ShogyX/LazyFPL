@@ -109,6 +109,10 @@ export interface GeneralSettings {
   notify_email: boolean;
   notify_push: boolean;
   ev_threshold: number;
+  smtp_host: string | null;
+  smtp_port: number;
+  smtp_from: string | null;
+  smtp_to: string | null;
 }
 
 export interface ModelsInfo {

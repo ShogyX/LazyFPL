@@ -126,9 +126,31 @@ class NotificationService:
         def secret(v):
             return v.get_secret_value() if v is not None else None
 
+        # Operator-editable values from the Settings page (DB) override env: the
+        # SMTP host/port/sender/recipient and the credentials. Lazy import keeps
+        # the notify module free of an api-package import cycle.
+        general: dict = {}
+        eff = None
+        try:
+            from ..api import settings_store
+            general = settings_store.read_general()
+            eff = settings_store.effective_secret
+        except Exception:
+            pass
+
+        def gen(key, fallback):
+            v = general.get(key)
+            return v if v not in (None, "") else fallback
+
+        def cred(key, env_val):
+            return eff(key) if eff is not None else secret(env_val)
+
         channels: list[Channel] = [
-            PushoverChannel(secret(s.pushover_token), secret(s.pushover_user)),
-            EmailChannel(s.smtp_host, s.smtp_port, secret(s.smtp_username),
-                         secret(s.smtp_password), s.smtp_from, s.smtp_to),
+            PushoverChannel(cred("pushover_token", s.pushover_token),
+                            cred("pushover_user", s.pushover_user)),
+            EmailChannel(gen("smtp_host", s.smtp_host), int(gen("smtp_port", s.smtp_port)),
+                         cred("smtp_username", s.smtp_username),
+                         cred("smtp_password", s.smtp_password),
+                         gen("smtp_from", s.smtp_from), gen("smtp_to", s.smtp_to)),
         ]
         return cls(channels=channels, **kw)

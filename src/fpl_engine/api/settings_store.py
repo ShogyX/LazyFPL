@@ -35,6 +35,12 @@ GENERAL_DEFAULTS: dict[str, Any] = {
     "notify_email": False,
     "notify_push": False,
     "ev_threshold": 1.0,
+    # Email (SMTP) delivery — host/port/sender/recipient. Credentials live in
+    # SECRET_KEYS. A recipient (smtp_to) is required for email to send.
+    "smtp_host": None,
+    "smtp_port": 587,
+    "smtp_from": None,
+    "smtp_to": None,
 }
 
 # Secret keys editable from the UI. Maps the settings key -> the env-backed
