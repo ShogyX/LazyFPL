@@ -459,47 +459,72 @@ def cmd_freeze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _progress_bar(done: int, total: int, label: str) -> None:
+    width = 28
+    filled = int(width * done / total) if total else width
+    bar = "█" * filled + "░" * (width - filled)
+    pct = int(100 * done / total) if total else 100
+    print(f"[{done}/{total}] ▕{bar}▏ {pct:3d}%  {label}", flush=True)
+
+
 def cmd_bootstrap(args: argparse.Namespace) -> int:
-    """One-time setup for a fresh install: acquire all historical seasons,
-    resolve identities, build facts/DC/targets/feature panel, run the predictive
-    study, freeze the model, then produce current-GW predictions. Idempotent and
-    resilient (a failed stage is logged and skipped). Needs internet; can take
-    10-30+ minutes for all seasons."""
-    from .store.dc import DcReconstructor
+    """One-time setup for a fresh install: acquire history, resolve identities,
+    build facts/DC/targets/feature panel, run the study, freeze the model, then
+    predict the current GW.
 
-    fetch = FetchClient()
-    steps: list[dict] = []
+    Each stage runs as a SEPARATE PROCESS so its memory is reclaimed before the
+    next — a single-process run of all seasons OOMs small containers. Defaults to
+    the most recent ``--years`` seasons to bound memory; ``--all-seasons`` does
+    the full history (needs more RAM). Resilient: a failed stage is reported but
+    the rest continue."""
+    import os
+    import shutil
+    import subprocess
+    import sys as _sys
 
-    def step(name, fn):
-        log.info("bootstrap: starting", extra={"step": name})
-        try:
-            fn()
-            steps.append({"step": name, "status": "ok"})
-            log.info("bootstrap: done", extra={"step": name})
-        except Exception as exc:  # keep going; report at the end
-            steps.append({"step": name, "status": f"FAILED: {exc}"})
-            log.warning("bootstrap: step failed", extra={"step": name, "error": str(exc)})
+    from .ingest.vaastav import SEASONS as ALL_SEASONS
 
-    try:
-        v = VaastavIngestor(fetch)
-        fb = FactBuilder(v)
-        step("acquire_history", lambda: v.acquire(seasons=None))
-        step("crosswalk", lambda: CrosswalkBuilder(v).build_fpl(seasons=None))
-        step("facts", lambda: (fb.build_player_match_stats(None), fb.build_team_match_stats(None)))
-        step("defensive_contribution", lambda: DcReconstructor().build(seasons=None))
-        step("targets", lambda: TargetBuilder().build(seasons=None))
-        step("feature_panel", lambda: PanelBuilder().build(seasons=None))
-        step("study", lambda: PredictiveValidityStudy(study_version=args.study_version)
-             .run(positions=(1, 2, 3, 4), seasons=None))
-        step("freeze_model", lambda: WeightFreezer(study_version=args.study_version,
-             registry_version=args.version).freeze(holdout_season=None))
-        step("refresh_predictions", lambda: refresh_predictions(fetch, version=args.version))
-    finally:
-        fetch.close()
+    if args.seasons:
+        seasons = list(args.seasons)
+    elif args.all_seasons:
+        seasons = list(ALL_SEASONS)
+    else:
+        seasons = list(ALL_SEASONS)[-max(1, args.years):]
 
-    ok = all(s["status"] == "ok" for s in steps)
-    print(json.dumps({"bootstrap": steps, "ok": ok}, indent=2, default=str))
-    return 0 if ok else 1
+    fpl_bin = shutil.which("fpl") or os.path.join(os.path.dirname(_sys.executable), "fpl")
+    # MALLOC_ARENA_MAX caps glibc per-thread arenas — a big RSS win in containers.
+    env = {**os.environ, "MALLOC_ARENA_MAX": "2", "PYTHONUNBUFFERED": "1"}
+    sf = ["--seasons", *seasons]
+
+    stages: list[tuple[str, list[str]]] = [
+        ("acquire history", [fpl_bin, "history", "acquire", *sf]),
+        ("resolve identities", [fpl_bin, "resolve", *sf]),
+        ("build facts", [fpl_bin, "facts", *sf]),
+        ("defensive contribution", [fpl_bin, "dc", *sf]),
+        ("build targets", [fpl_bin, "targets", *sf]),
+        ("feature panel", [fpl_bin, "features", "panel", *sf]),
+        ("predictive study", [fpl_bin, "study", *sf, "--version", args.study_version]),
+        ("freeze model", [fpl_bin, "freeze", "--study-version", args.study_version,
+                          "--version", args.version]),
+        ("predict current GW", [fpl_bin, "refresh", "--version", args.version]),
+    ]
+    total = len(stages)
+    print(f"bootstrap: {len(seasons)} seasons ({seasons[0]}..{seasons[-1]}), "
+          f"{total} stages, memory-bounded (one process per stage)\n", flush=True)
+
+    failed: list[str] = []
+    for i, (name, cmd) in enumerate(stages, 1):
+        _progress_bar(i - 1, total, f"starting: {name}")
+        rc = subprocess.call(cmd, env=env)          # inherit stdio -> live logs
+        if rc != 0:
+            failed.append(name)
+            log.warning("bootstrap stage failed", extra={"stage": name, "rc": rc})
+        _progress_bar(i, total, name if rc == 0 else f"{name}  [FAILED rc={rc}]")
+        print(flush=True)
+
+    print(json.dumps({"seasons": seasons, "stages": total,
+                      "failed": failed, "ok": not failed}, indent=2))
+    return 0 if not failed else 1
 
 
 def cmd_predict(args: argparse.Namespace) -> int:
@@ -956,9 +981,14 @@ def build_parser() -> argparse.ArgumentParser:
     rf.add_argument("--horizon", type=int, default=6, help="predict the next N GWs")
     rf.set_defaults(fn=cmd_refresh)
 
-    bs = sub.add_parser("bootstrap", help="one-time setup: backfill all history, train + freeze the model, then predict")
+    bs = sub.add_parser("bootstrap", help="one-time setup: backfill history, train + freeze the model, then predict (memory-bounded, one process per stage)")
     bs.add_argument("--version", default="v1", help="model_registry version to freeze")
     bs.add_argument("--study-version", default="v1-dev")
+    bs.add_argument("--years", type=int, default=6,
+                    help="use the most recent N seasons (bounds memory; default 6)")
+    bs.add_argument("--all-seasons", action="store_true",
+                    help="use every available season (needs more RAM)")
+    bs.add_argument("--seasons", nargs="*", help="explicit season list (overrides --years)")
     bs.set_defaults(fn=cmd_bootstrap)
 
     fe = sub.add_parser("freeze-ensemble", help="freeze an ensemble as a versioned model")

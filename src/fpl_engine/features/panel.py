@@ -147,6 +147,13 @@ class PanelBuilder:
                         if kt and (hist_last_kickoff is None or kt > hist_last_kickoff):
                             hist_last_kickoff = kt
 
+                # Flush incrementally so peak memory stays bounded (the built
+                # rows carry a ~50-feature dict each — holding them all at once
+                # is what OOMs a backfill of many seasons).
+                if len(batch) >= 5000:
+                    self._flush(s, batch)
+                    batch.clear()
+
                 # Forward rows: with all played history absorbed, emit one per
                 # upcoming GW this player's current team plays.
                 if include_upcoming and hist_n >= min_history and player_key in up_meta:
