@@ -80,15 +80,23 @@ fresh without manual steps:
 | Job | Cadence | What it does |
 |---|---|---|
 | `fpl_bootstrap` / `fpl_fixtures` | hourly | pull FPL prices/status/news + fixtures |
-| `refresh_predictions` | every 6h | rebuild current-GW xP (facts → targets → panel → predict) |
+| `refresh_predictions` | every 6h | rebuild xP for the **next 6 GWs** (ingest → crosswalk → facts → targets → panel → predict) |
 | `price_watch` | daily 01:30 | on price moves → full recompute + recommendation |
 | `news_lineup_watch` | every 30 min | on injury/lineup flips → recompute |
 | `post_match_recompute` | every 15 min | once bonus is confirmed → recompute |
 | `elite_refresh` | weekly | elite-cohort ownership |
 
+The refresh **auto-detects the current season and next gameweek from the live FPL
+calendar** (so a brand-new season — and GW1 — is picked up the moment the API
+publishes it, no manual config). It builds *forward* feature rows for upcoming,
+not-yet-played gameweeks, so the model forecasts the whole planning horizon (GW1 of
+a new season is forecast from prior-season carryover) — and it correctly drops teams
+in blank gameweeks. These forward rows are leakage-safe (history strictly precedes
+each gameweek's deadline).
+
 Run it as a service via `./install.sh --with-scheduler` (systemd `--user`), or
-manually: `source .venv/bin/activate && fpl schedule`. For a one-off rebuild of the
-current gameweek's predictions: `fpl refresh`.
+manually: `source .venv/bin/activate && fpl schedule`. One-off rebuild of the next N
+gameweeks: `fpl refresh --horizon 6`.
 
 CLI examples:
 

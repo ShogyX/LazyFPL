@@ -113,6 +113,45 @@ def test_leakage_audit_passes(sm):
     assert audit["ok"] is True
 
 
+def test_panel_emits_upcoming_forward_rows(sm):
+    """include_upcoming -> a target-less feature row for the next unplayed GW,
+    so the model can forecast it live; leakage guarantee still holds."""
+    from datetime import datetime, timezone
+
+    from fpl_engine.db.models import players, team_match_stats
+
+    _pipeline(sm)
+    with sm() as s:
+        # current FPL squad state (crosswalk source_id '1' -> players.id 1)
+        s.execute(players.insert(), [{"id": 1, "code": 100, "team_id": 1,
+                                      "element_type": 3, "web_name": "Saka"}])
+        # an upcoming (unplayed: result NULL) GW4 fixture for team 1
+        s.execute(team_match_stats.insert(), [{
+            "season": "2025-26", "fixture_id": 40, "team_id": 1,
+            "opponent_team_id": 5, "gw": 4, "was_home": True,
+            "kickoff_time": datetime(2025, 9, 6, 14, tzinfo=timezone.utc)}])
+        s.commit()
+
+    PanelBuilder(sm=sm).build(seasons=["2025-26"], min_history=1,
+                              include_upcoming=True, upcoming_season="2025-26",
+                              upcoming_horizon=4)
+
+    with sm() as s:
+        rows = {r.gw: r for r in s.execute(
+            select(training_rows).where(training_rows.c.player_key == 100)
+            .order_by(training_rows.c.gw)).all()}
+
+    assert 4 in rows                                  # forward row emitted
+    fwd = rows[4]
+    assert fwd.tgt_pts_next1 is None                  # unplayed -> no target
+    assert fwd.tgt_first_kickoff is None
+    assert fwd.element_type == 3 and fwd.element_id == 1
+    assert fwd.features["total_points__mean_3"] is not None  # history-based features
+
+    audit = PanelBuilder(sm=sm).leakage_audit(season="2025-26")
+    assert audit["ok"] is True                        # forward rows stay causal
+
+
 def test_per_position_assembly_has_families_with_spans(sm):
     _pipeline(sm)
     PanelBuilder(sm=sm).build(seasons=["2025-26"], min_history=1)

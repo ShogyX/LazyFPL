@@ -15,12 +15,20 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..db.engine import get_sessionmaker
-from ..db.models import player_advanced_match_stats, player_match_stats, targets, training_rows
+from ..db.models import (
+    id_crosswalk,
+    player_advanced_match_stats,
+    player_match_stats,
+    players,
+    targets,
+    team_match_stats,
+    training_rows,
+)
 from ..logging_setup import get_logger
 from .windows import EWMA_LOOKBACK, per90, window_features
 
@@ -83,11 +91,24 @@ class PanelBuilder:
         seasons: Iterable[str] | None = None,
         *,
         min_history: int = 1,
+        include_upcoming: bool = False,
+        upcoming_season: str | None = None,
+        upcoming_horizon: int = 8,
     ) -> list[PanelBuildResult]:
+        """Build the causal training panel. With ``include_upcoming``, also emit
+        target-less feature rows for the next ``upcoming_horizon`` unplayed GWs of
+        ``upcoming_season`` so the model can forecast live (incl. GW1 at season
+        start, from prior-season carryover)."""
         want = set(seasons) if seasons is not None else None
         by_player = self._load()
         counts: dict[str, int] = {}
         batch: list[dict] = []
+
+        up_by_team: dict[int, list[tuple[int, datetime]]] = {}
+        up_meta: dict[int, tuple[int, int, int]] = {}
+        if include_upcoming:
+            up_by_team, _ = self._upcoming_team_gws(upcoming_season, upcoming_horizon)
+            up_meta = self._current_meta(upcoming_season)
 
         with self._sm() as s:
             for player_key, matches in by_player.items():
@@ -117,6 +138,16 @@ class PanelBuilder:
                         kt = m["kickoff_time"]
                         if kt and (hist_last_kickoff is None or kt > hist_last_kickoff):
                             hist_last_kickoff = kt
+
+                # Forward rows: with all played history absorbed, emit one per
+                # upcoming GW this player's current team plays.
+                if include_upcoming and hist_n >= min_history and player_key in up_meta:
+                    meta = up_meta[player_key]
+                    for gw, deadline in up_by_team.get(meta[2], []):
+                        batch.append(self._make_forward_row(
+                            player_key, upcoming_season, gw, deadline, meta,
+                            recent, career_sum, career_n, hist_n, hist_last_kickoff))
+                        counts[upcoming_season] = counts.get(upcoming_season, 0) + 1
 
             self._flush(s, batch)
             s.commit()
@@ -231,8 +262,10 @@ class PanelBuilder:
                 career_n[metric] += 1
 
     # -- feature + target assembly for one prediction point --
-    def _make_row(self, player_key, season, gw, season_idx, recent,
-                  career_sum, career_n, hist_n, hist_last_kickoff, sample) -> dict:
+    @staticmethod
+    def _compute_features(recent, career_sum, career_n) -> dict[str, float | None]:
+        """Trailing feature vector from the player's prior appearances only —
+        this is the full model-input set (opponent context is injected later)."""
         feats: dict[str, float | None] = {}
         for metric in WINDOW_METRICS:
             # cast at the DB boundary: Numeric columns arrive as Decimal
@@ -254,6 +287,11 @@ class PanelBuilder:
             msum = float(sum(r[metric] for r in present))
             minsum = float(sum((r["minutes"] or 0) for r in present))
             feats[name] = per90(msum, minsum)
+        return feats
+
+    def _make_row(self, player_key, season, gw, season_idx, recent,
+                  career_sum, career_n, hist_n, hist_last_kickoff, sample) -> dict:
+        feats = self._compute_features(recent, career_sum, career_n)
 
         sgw = season_idx[season]
         n1 = sgw[gw]
@@ -276,6 +314,67 @@ class PanelBuilder:
             "n_gw_next6": len(next6), "n_gw_ros": len(ros),
             "features": feats, "feature_version": FEATURE_VERSION,
         }
+
+    def _make_forward_row(self, player_key, season, gw, deadline, meta,
+                          recent, career_sum, career_n, hist_n, hist_last_kickoff) -> dict:
+        """A target-less feature row for an *upcoming* (unplayed) GW so the model
+        can forecast it live. Features use only history before the deadline, so
+        the leakage guarantee (hist_last_kickoff < deadline) still holds."""
+        return {
+            "season": season, "player_key": player_key, "gw": gw,
+            "element_id": meta[0], "element_type": meta[1],
+            "deadline": deadline, "hist_n": hist_n,
+            "hist_last_kickoff": hist_last_kickoff, "tgt_first_kickoff": None,
+            "tgt_pts_next1": None, "tgt_pts_next6": None, "tgt_pts_ros": None,
+            "tgt_pts_norm_next1": None, "tgt_pts_norm_next6": None, "tgt_pts_norm_ros": None,
+            "tgt_minutes_next1": None, "n_gw_next6": None, "n_gw_ros": None,
+            "features": self._compute_features(recent, career_sum, career_n),
+            "feature_version": FEATURE_VERSION,
+        }
+
+    def _current_meta(self, season: str) -> dict[int, tuple[int, int, int]]:
+        """{player_key: (element_id, element_type, team_id)} for the season's FPL
+        squad, joining the crosswalk to current bootstrap player state in Python
+        (source_id is text, players.id is int)."""
+        x, pl = id_crosswalk.c, players.c
+        with self._sm() as s:
+            xrows = s.execute(
+                select(x.source_id, x.player_key)
+                .where(x.source == "fpl", x.season == season, x.player_key.isnot(None))
+            ).all()
+            prows = s.execute(
+                select(pl.id, pl.element_type, pl.team_id)
+                .where(pl.element_type.isnot(None), pl.team_id.isnot(None))
+            ).all()
+        pmap = {int(p[0]): (int(p[1]), int(p[2])) for p in prows}
+        out: dict[int, tuple[int, int, int]] = {}
+        for source_id, pk in xrows:
+            try:
+                eid = int(source_id)
+            except (TypeError, ValueError):
+                continue
+            if eid in pmap:
+                et, team = pmap[eid]
+                out[int(pk)] = (eid, et, team)
+        return out
+
+    def _upcoming_team_gws(self, season: str, horizon: int) -> tuple[dict[int, list[tuple[int, datetime]]], set[int]]:
+        """{team_id: [(gw, deadline)...]} for the next ``horizon`` unplayed GWs,
+        plus the set of those GW numbers. Deadline = earliest kickoff in the GW."""
+        t = team_match_stats.c
+        with self._sm() as s:
+            rows = s.execute(
+                select(t.team_id, t.gw, func.min(t.kickoff_time))
+                .where(t.season == season, t.result.is_(None), t.gw.isnot(None))
+                .group_by(t.team_id, t.gw)
+            ).all()
+        gws = sorted({int(r[1]) for r in rows})[:horizon]
+        keep = set(gws)
+        by_team: dict[int, list[tuple[int, datetime]]] = {}
+        for team_id, gw, ko in rows:
+            if int(gw) in keep:
+                by_team.setdefault(int(team_id), []).append((int(gw), ko))
+        return by_team, keep
 
     def _flush(self, s: Session, batch: list[dict]) -> None:
         for i in range(0, len(batch), 500):

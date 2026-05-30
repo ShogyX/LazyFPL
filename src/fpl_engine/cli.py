@@ -51,8 +51,21 @@ from .store.targets import TargetBuilder
 log = get_logger("fpl.cli")
 
 
-def _current_season() -> str:
-    """The season the engine is currently operating in (latest known)."""
+def _current_season(fetch: FetchClient | None = None) -> str:
+    """The season the engine is operating in. Derived dynamically from the live
+    FPL calendar (GW1 deadline year) so a brand-new season is picked up the
+    moment the API publishes it; falls back to the latest known season."""
+    if fetch is not None:
+        try:
+            from datetime import datetime
+            boot = fetch.get("fpl", "/bootstrap-static/", cache_ttl=0).payload
+            events = boot.get("events", []) if isinstance(boot, dict) else []
+            ds = [e.get("deadline_time") for e in events if e.get("deadline_time")]
+            if ds:
+                y = min(datetime.fromisoformat(d.replace("Z", "+00:00")) for d in ds).year
+                return f"{y}-{(y + 1) % 100:02d}"
+        except Exception:
+            pass
     return VaastavIngestor.SEASONS[-1]
 
 
@@ -68,40 +81,59 @@ def _current_gw(fetch: FetchClient) -> int | None:
     return max(finished) if finished else None
 
 
-def _servable_gw(season: str, want: int | None) -> int | None:
-    """The GW to predict: ``want`` if its feature panel exists, else the latest
-    GW with built ``training_rows`` for the season (None if there are none)."""
+def _servable_gws(season: str, want: list[int]) -> list[int]:
+    """Of the requested GWs, those that have a built feature panel. If none do,
+    fall back to the single latest GW with ``training_rows`` (guards an
+    FPL-vs-data mismatch, e.g. a frozen snapshot lagging the live calendar)."""
     from sqlalchemy import func, select
     from .db.engine import get_sessionmaker
     from .db.models import training_rows
     tr = training_rows.c
     with get_sessionmaker()() as s:
-        if want is not None:
-            has = s.execute(select(func.count()).where(
-                tr.season == season, tr.gw == want)).scalar_one()
-            if has:
-                return want
-        return s.execute(select(func.max(tr.gw)).where(tr.season == season)).scalar_one_or_none()
+        have = {int(r[0]) for r in s.execute(
+            select(tr.gw).distinct().where(tr.season == season)).all()}
+        servable = [g for g in want if g in have]
+        if servable:
+            return servable
+        latest = s.execute(select(func.max(tr.gw)).where(tr.season == season)).scalar_one_or_none()
+        return [int(latest)] if latest is not None else []
 
 
-def refresh_predictions(fetch: FetchClient, *, version: str = "v1") -> int | None:
-    """Run the full hands-off pipeline for the current season/GW so served
-    predictions stay fresh: facts -> targets -> feature panel -> predict.
+def refresh_predictions(fetch: FetchClient, *, version: str = "v1",
+                        horizon: int = 6) -> dict[int, int] | None:
+    """Hands-off pipeline so served predictions stay fresh for the whole
+    planning horizon. Detects the current season + next GW from the live FPL
+    calendar, pulls/builds that season's data (incl. the upcoming-GW feature
+    rows), and predicts every GW from the next one out to ``horizon`` ahead.
 
     Each stage is wrapped so one failure is logged and skipped rather than
-    aborting the scheduler. Returns the number of players predicted (or None).
+    aborting the scheduler. Returns {gw: n_players} (or None if nothing to do).
     """
-    season = _current_season()
+    # Always refresh live current-state first (prices, status, fixtures), then
+    # derive the season/GW from that fresh calendar.
+    for name, fn in (("bootstrap", FplIngestor(fetch).ingest_bootstrap),
+                     ("fixtures", FplIngestor(fetch).ingest_fixtures)):
+        try:
+            fn()
+        except Exception as exc:
+            log.warning("refresh ingest failed", extra={"stage": name, "error": str(exc)})
+
+    season = _current_season(fetch)
     gw = _current_gw(fetch)
     if gw is None:
         log.info("refresh_predictions: no current GW (pre-season?)")
         return None
 
+    fb = FactBuilder(VaastavIngestor(fetch))
     stages = (
-        ("facts", lambda: (FactBuilder(VaastavIngestor(fetch)).build_player_match_stats([season]),
-                           FactBuilder(VaastavIngestor(fetch)).build_team_match_stats([season]))),
+        ("crosswalk", lambda: CrosswalkBuilder(VaastavIngestor(fetch)).build_fpl([season])),
+        ("facts", lambda: (fb.build_player_match_stats([season]), fb.build_team_match_stats([season]))),
         ("targets", lambda: TargetBuilder().build(seasons=[season])),
-        ("panel", lambda: PanelBuilder().build(seasons=[season])),
+        # include_upcoming -> emit target-less feature rows for the next GWs so
+        # the upcoming (unplayed) gameweeks are forecastable, not just past ones.
+        ("panel", lambda: PanelBuilder().build(
+            seasons=[season], include_upcoming=True, upcoming_season=season,
+            upcoming_horizon=horizon + 2)),
     )
     for name, fn in stages:
         try:
@@ -109,27 +141,25 @@ def refresh_predictions(fetch: FetchClient, *, version: str = "v1") -> int | Non
         except Exception as exc:  # keep the scheduler alive
             log.warning("refresh stage failed", extra={"stage": name, "season": season, "error": str(exc)})
 
-    # Predict the upcoming GW, but fall back to the latest GW that actually has a
-    # built feature panel — guards against an FPL-vs-data mismatch (e.g. a frozen
-    # data snapshot whose newest training rows lag the live calendar).
-    target_gw = _servable_gw(season, gw)
-    if target_gw != gw:
-        log.info("refresh_predictions: target GW adjusted to latest servable",
-                 extra={"requested": gw, "servable": target_gw})
-    gw = target_gw
-    if gw is None:
+    want = list(range(gw, gw + horizon))
+    target_gws = _servable_gws(season, want)
+    if target_gws != want:
+        log.info("refresh_predictions: serving available GWs",
+                 extra={"requested": want, "servable": target_gws})
+    if not target_gws:
         log.info("refresh_predictions: no servable GW with feature rows")
         return None
 
-    try:
-        res = prediction_server(version=version).predict_gw(season, gw)
-        log.info("refresh_predictions done",
-                 extra={"season": season, "gw": gw, "version": version, "n_players": res.n_players})
-        return res.n_players
-    except Exception as exc:
-        log.warning("predict stage failed",
-                    extra={"season": season, "gw": gw, "error": str(exc)})
-        return None
+    server = prediction_server(version=version)
+    out: dict[int, int] = {}
+    for g in target_gws:
+        try:
+            out[g] = server.predict_gw(season, g).n_players
+        except Exception as exc:
+            log.warning("predict stage failed", extra={"season": season, "gw": g, "error": str(exc)})
+    log.info("refresh_predictions done",
+             extra={"season": season, "version": version, "gws": list(out), "by_gw": out})
+    return out or None
 
 
 def _default_recompute(fetch: FetchClient):
@@ -153,7 +183,7 @@ def _default_recompute(fetch: FetchClient):
             if len(roster) == 15 and gw is not None:
                 bank, purchase = ing.resolve_budget(entry_id)
                 RecommendationEngine().generate(
-                    _current_season(), gw, roster, entry_id=entry_id,
+                    _current_season(fetch), gw, roster, entry_id=entry_id,
                     bank=bank, purchase=purchase)
             log.info("recompute: entry + recommendation refreshed", extra={"entry_id": entry_id})
         except Exception as exc:
@@ -445,12 +475,12 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     equivalent."""
     fetch = FetchClient()
     try:
-        gw = _current_gw(fetch)
-        n = refresh_predictions(fetch, version=args.version)
+        season = _current_season(fetch)
+        by_gw = refresh_predictions(fetch, version=args.version, horizon=args.horizon)
     finally:
         fetch.close()
-    print(json.dumps({"season": _current_season(), "gw": gw, "predicted": n}, default=str))
-    return 0 if n else 1
+    print(json.dumps({"season": season, "predicted_by_gw": by_gw}, default=str))
+    return 0 if by_gw else 1
 
 
 def cmd_freeze_ensemble(args: argparse.Namespace) -> int:
@@ -878,8 +908,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="use the §C.1 bottom-up component predictor (minutes-gated)")
     pr.set_defaults(fn=cmd_predict)
 
-    rf = sub.add_parser("refresh", help="run the full current-GW pipeline once (facts->targets->panel->predict)")
+    rf = sub.add_parser("refresh", help="run the full current-GW pipeline once (ingest->facts->targets->panel->predict for the next N GWs)")
     rf.add_argument("--version", default="v1")
+    rf.add_argument("--horizon", type=int, default=6, help="predict the next N GWs")
     rf.set_defaults(fn=cmd_refresh)
 
     fe = sub.add_parser("freeze-ensemble", help="freeze an ensemble as a versioned model")

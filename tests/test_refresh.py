@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from fpl_engine.cli import _current_gw, _servable_gw
+from fpl_engine.cli import _current_gw, _servable_gws
 from fpl_engine.db.models import training_rows
 
 SEASON = "2025-26"
@@ -35,25 +35,24 @@ def test_current_gw_none_preseason():
     assert _current_gw(_FakeFetch([])) is None
 
 
-def test_servable_gw_prefers_requested_when_panel_exists(sm):
-    with sm() as s:
-        s.execute(training_rows.insert(), [
-            _row(gw) for gw in (10, 11, 12)
-        ])
-        s.commit()
-    assert _servable_gw(SEASON, 11) == 11
-
-
-def test_servable_gw_falls_back_to_latest_built(sm):
+def test_servable_gws_filters_to_built_panels(sm):
     with sm() as s:
         s.execute(training_rows.insert(), [_row(gw) for gw in (10, 11, 12)])
         s.commit()
-    # GW 38 has no panel rows -> fall back to the latest that does (12).
-    assert _servable_gw(SEASON, 38) == 12
+    # Of the requested range, only those with panel rows are returned.
+    assert _servable_gws(SEASON, [10, 11, 12, 13, 14]) == [10, 11, 12]
 
 
-def test_servable_gw_none_when_no_rows(sm):
-    assert _servable_gw(SEASON, 5) is None
+def test_servable_gws_falls_back_to_latest_built(sm):
+    with sm() as s:
+        s.execute(training_rows.insert(), [_row(gw) for gw in (10, 11, 12)])
+        s.commit()
+    # None of the requested GWs have rows -> fall back to the latest that does.
+    assert _servable_gws(SEASON, [38, 39, 40]) == [12]
+
+
+def test_servable_gws_none_when_no_rows(sm):
+    assert _servable_gws(SEASON, [5, 6]) == []
 
 
 def _row(gw: int) -> dict:
