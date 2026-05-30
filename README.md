@@ -54,9 +54,10 @@ model registry), `serving` (predictions, recommendations, backtests), and `core`
 ```bash
 git clone https://github.com/ShogyX/LazyFPL.git
 cd LazyFPL
-./install.sh            # creates venv, installs deps, builds the frontend
-cp .env.example .env    # fill in DB URL + optional API keys (install.sh does this too)
-alembic upgrade head    # apply DB migrations (needs Postgres running)
+./install.sh                    # venv, deps, frontend build (+ systemd templates)
+./install.sh --with-scheduler   # also install & enable the auto-refresh service
+cp .env.example .env            # fill in DB URL + optional API keys (install.sh does this too)
+alembic upgrade head            # apply DB migrations (needs Postgres running)
 ```
 
 Requirements: **Python 3.11+**, **Node 18+**, **PostgreSQL 14+**.
@@ -71,11 +72,31 @@ uvicorn fpl_engine.api.app:app --reload --port 8000
 cd frontend && npm run dev
 ```
 
+### Automatic refresh (hands-off)
+
+`fpl schedule` starts a blocking scheduler (APScheduler) that keeps everything
+fresh without manual steps:
+
+| Job | Cadence | What it does |
+|---|---|---|
+| `fpl_bootstrap` / `fpl_fixtures` | hourly | pull FPL prices/status/news + fixtures |
+| `refresh_predictions` | every 6h | rebuild current-GW xP (facts → targets → panel → predict) |
+| `price_watch` | daily 01:30 | on price moves → full recompute + recommendation |
+| `news_lineup_watch` | every 30 min | on injury/lineup flips → recompute |
+| `post_match_recompute` | every 15 min | once bonus is confirmed → recompute |
+| `elite_refresh` | weekly | elite-cohort ownership |
+
+Run it as a service via `./install.sh --with-scheduler` (systemd `--user`), or
+manually: `source .venv/bin/activate && fpl schedule`. For a one-off rebuild of the
+current gameweek's predictions: `fpl refresh`.
+
 CLI examples:
 
 ```bash
 fpl --help
-fpl backtest --season 2024-25 --strategy ict          # backtest a strategy
+fpl schedule                                            # start auto-refresh (blocking)
+fpl refresh                                             # rebuild current-GW predictions once
+fpl backtest --season 2024-25 --strategy ict           # backtest a strategy
 fpl recommend --entry <id> --season 2024-25 --from-gw 30
 fpl track --entry <id>                                  # pull & save your team
 ```

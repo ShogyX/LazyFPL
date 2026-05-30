@@ -51,18 +51,114 @@ from .store.targets import TargetBuilder
 log = get_logger("fpl.cli")
 
 
+def _current_season() -> str:
+    """The season the engine is currently operating in (latest known)."""
+    return VaastavIngestor.SEASONS[-1]
+
+
+def _current_gw(fetch: FetchClient) -> int | None:
+    """Next unfinished gameweek from the FPL bootstrap (the one to predict);
+    falls back to the latest finished GW, or None pre-season."""
+    boot = fetch.get("fpl", "/bootstrap-static/", cache_ttl=0).payload
+    events = boot.get("events", []) if isinstance(boot, dict) else []
+    upcoming = [int(e["id"]) for e in events if not e.get("finished") and e.get("id")]
+    if upcoming:
+        return min(upcoming)
+    finished = [int(e["id"]) for e in events if e.get("finished") and e.get("id")]
+    return max(finished) if finished else None
+
+
+def _servable_gw(season: str, want: int | None) -> int | None:
+    """The GW to predict: ``want`` if its feature panel exists, else the latest
+    GW with built ``training_rows`` for the season (None if there are none)."""
+    from sqlalchemy import func, select
+    from .db.engine import get_sessionmaker
+    from .db.models import training_rows
+    tr = training_rows.c
+    with get_sessionmaker()() as s:
+        if want is not None:
+            has = s.execute(select(func.count()).where(
+                tr.season == season, tr.gw == want)).scalar_one()
+            if has:
+                return want
+        return s.execute(select(func.max(tr.gw)).where(tr.season == season)).scalar_one_or_none()
+
+
+def refresh_predictions(fetch: FetchClient, *, version: str = "v1") -> int | None:
+    """Run the full hands-off pipeline for the current season/GW so served
+    predictions stay fresh: facts -> targets -> feature panel -> predict.
+
+    Each stage is wrapped so one failure is logged and skipped rather than
+    aborting the scheduler. Returns the number of players predicted (or None).
+    """
+    season = _current_season()
+    gw = _current_gw(fetch)
+    if gw is None:
+        log.info("refresh_predictions: no current GW (pre-season?)")
+        return None
+
+    stages = (
+        ("facts", lambda: (FactBuilder(VaastavIngestor(fetch)).build_player_match_stats([season]),
+                           FactBuilder(VaastavIngestor(fetch)).build_team_match_stats([season]))),
+        ("targets", lambda: TargetBuilder().build(seasons=[season])),
+        ("panel", lambda: PanelBuilder().build(seasons=[season])),
+    )
+    for name, fn in stages:
+        try:
+            fn()
+        except Exception as exc:  # keep the scheduler alive
+            log.warning("refresh stage failed", extra={"stage": name, "season": season, "error": str(exc)})
+
+    # Predict the upcoming GW, but fall back to the latest GW that actually has a
+    # built feature panel — guards against an FPL-vs-data mismatch (e.g. a frozen
+    # data snapshot whose newest training rows lag the live calendar).
+    target_gw = _servable_gw(season, gw)
+    if target_gw != gw:
+        log.info("refresh_predictions: target GW adjusted to latest servable",
+                 extra={"requested": gw, "servable": target_gw})
+    gw = target_gw
+    if gw is None:
+        log.info("refresh_predictions: no servable GW with feature rows")
+        return None
+
+    try:
+        res = prediction_server(version=version).predict_gw(season, gw)
+        log.info("refresh_predictions done",
+                 extra={"season": season, "gw": gw, "version": version, "n_players": res.n_players})
+        return res.n_players
+    except Exception as exc:
+        log.warning("predict stage failed",
+                    extra={"season": season, "gw": gw, "error": str(exc)})
+        return None
+
+
 def _default_recompute(fetch: FetchClient):
-    """Build the recompute fired by triggers: track the operator entry + emit a
-    fresh recommendation. No-op (logged) when no entry is configured."""
+    """Build the recompute fired by triggers (price move / news flip / results
+    confirmed): regenerate current-GW predictions, refresh the operator entry,
+    and emit a fresh recommendation. Triggers fire only on material change, so
+    this runs the full pipeline just when something actually moved."""
     from .config import get_settings
-    entry_id = get_settings().fpl_entry_id
 
     def recompute() -> None:
+        refresh_predictions(fetch)
+        entry_id = get_settings().fpl_entry_id
         if entry_id is None:
-            log.info("recompute requested but no FPL_FPL_ENTRY_ID configured")
+            log.info("recompute: no FPL_FPL_ENTRY_ID configured; skipped entry/recommendation")
             return
-        EntryIngestor(fetch).ingest_entry(entry_id)
-        log.info("recompute: tracked entry refreshed", extra={"entry_id": entry_id})
+        try:
+            ing = EntryIngestor(fetch)
+            ing.ingest_entry(entry_id)
+            roster = set(ing.latest_roster(entry_id))
+            gw = _current_gw(fetch)
+            if len(roster) == 15 and gw is not None:
+                bank, purchase = ing.resolve_budget(entry_id)
+                RecommendationEngine().generate(
+                    _current_season(), gw, roster, entry_id=entry_id,
+                    bank=bank, purchase=purchase)
+            log.info("recompute: entry + recommendation refreshed", extra={"entry_id": entry_id})
+        except Exception as exc:
+            log.warning("recompute entry/recommendation failed",
+                        extra={"entry_id": entry_id, "error": str(exc)})
 
     return recompute
 
@@ -95,6 +191,11 @@ def build_orchestrator() -> tuple[Orchestrator, FetchClient]:
     # Polite hourly refresh.
     orch.register(Job("fpl_bootstrap", fpl.ingest_bootstrap, cron="0 * * * *"))
     orch.register(Job("fpl_fixtures", fpl.ingest_fixtures, cron="15 * * * *"))
+    # Hands-off prediction refresh: rebuild current-GW xP every 6h as a baseline
+    # (triggers below also refresh on material change). Keeps serving predictions
+    # fresh without manual `fpl predict` runs.
+    orch.register(Job("refresh_predictions", lambda: refresh_predictions(fetch),
+                      cron="20 */6 * * *"))
     # Concrete continuous triggers (plan 9.3): each detects change + recomputes.
     orch.register(Job("price_watch", triggers.price_watch, cron="30 1 * * *"))
     orch.register(Job("news_lineup_watch", triggers.news_lineup_watch, cron="*/30 * * * *"))
@@ -336,6 +437,20 @@ def cmd_predict(args: argparse.Namespace) -> int:
         res = prediction_server(version=args.version).predict_gw(args.season, args.gw)
     print(json.dumps(res.__dict__, indent=2, default=str))
     return 0
+
+
+def cmd_refresh(args: argparse.Namespace) -> int:
+    """Run the full current-GW prediction pipeline once (facts -> targets ->
+    panel -> predict). The scheduler runs this automatically; this is the manual
+    equivalent."""
+    fetch = FetchClient()
+    try:
+        gw = _current_gw(fetch)
+        n = refresh_predictions(fetch, version=args.version)
+    finally:
+        fetch.close()
+    print(json.dumps({"season": _current_season(), "gw": gw, "predicted": n}, default=str))
+    return 0 if n else 1
 
 
 def cmd_freeze_ensemble(args: argparse.Namespace) -> int:
@@ -762,6 +877,10 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--component", action="store_true",
                     help="use the §C.1 bottom-up component predictor (minutes-gated)")
     pr.set_defaults(fn=cmd_predict)
+
+    rf = sub.add_parser("refresh", help="run the full current-GW pipeline once (facts->targets->panel->predict)")
+    rf.add_argument("--version", default="v1")
+    rf.set_defaults(fn=cmd_refresh)
 
     fe = sub.add_parser("freeze-ensemble", help="freeze an ensemble as a versioned model")
     fe.add_argument("--version", default="v2")

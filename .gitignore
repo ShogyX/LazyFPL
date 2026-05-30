@@ -14,5 +14,8 @@ node_modules/
 *.tsbuildinfo
 .vite/
 
+# Generated, machine-specific systemd unit files
+deploy/
+
 # OS / editor
 .DS_Store
