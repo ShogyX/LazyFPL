@@ -189,10 +189,18 @@ def prediction_server(version: str = "v1", sm: sessionmaker[Session] | None = No
 
 
 def _round(v) -> float | None:
-    return round(float(v), 4) if v is not None else None
+    if v is None:
+        return None
+    f = float(v)
+    if f != f:  # NaN -> None, so a degenerate feature/weight never reaches the
+        return None  # stored prediction or the MILP optimiser as NaN
+    return round(f, 4)
 
 
 def _clamp_minutes(v) -> float | None:
     if v is None:
         return None
-    return round(min(max(float(v), 0.0), 120.0), 2)
+    f = float(v)
+    if f != f:  # NaN guard
+        return None
+    return round(min(max(f, 0.0), 120.0), 2)

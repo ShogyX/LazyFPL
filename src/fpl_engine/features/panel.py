@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -111,6 +111,14 @@ class PanelBuilder:
             up_meta = self._current_meta(upcoming_season)
 
         with self._sm() as s:
+            # Regenerate forward rows from scratch: drop the season's existing
+            # target-less rows so a GW that became blank/postponed for a player
+            # (no longer in their upcoming set) doesn't leave a stale forecast.
+            if include_upcoming:
+                tr = training_rows.c
+                s.execute(delete(training_rows).where(
+                    tr.season == upcoming_season, tr.tgt_first_kickoff.is_(None)))
+
             for player_key, matches in by_player.items():
                 matches.sort(key=self._sort_key)
                 season_idx = self._season_index(matches)
@@ -359,17 +367,27 @@ class PanelBuilder:
         return out
 
     def _upcoming_team_gws(self, season: str, horizon: int) -> tuple[dict[int, list[tuple[int, datetime]]], set[int]]:
-        """{team_id: [(gw, deadline)...]} for the next ``horizon`` unplayed GWs,
-        plus the set of those GW numbers. Deadline = earliest kickoff in the GW."""
+        """{team_id: [(gw, deadline)...]} for the next ``horizon`` *fully-future*
+        GWs, plus those GW numbers. Deadline = earliest kickoff in the GW.
+
+        Only GWs strictly after the latest gameweek with any played result count
+        as upcoming. That excludes postponed/null-result fixtures sitting in the
+        past, and the partially-played current GW in a split double gameweek —
+        both of which would otherwise produce spurious or target-clobbering rows.
+        """
         t = team_match_stats.c
         with self._sm() as s:
+            max_played = s.execute(
+                select(func.max(t.gw)).where(t.season == season, t.result.isnot(None))
+            ).scalar_one_or_none()
             rows = s.execute(
                 select(t.team_id, t.gw, func.min(t.kickoff_time))
                 .where(t.season == season, t.result.is_(None), t.gw.isnot(None))
                 .group_by(t.team_id, t.gw)
             ).all()
-        gws = sorted({int(r[1]) for r in rows})[:horizon]
-        keep = set(gws)
+        floor = int(max_played) if max_played is not None else 0
+        future = sorted({int(r[1]) for r in rows if int(r[1]) > floor})[:horizon]
+        keep = set(future)
         by_team: dict[int, list[tuple[int, datetime]]] = {}
         for team_id, gw, ko in rows:
             if int(gw) in keep:
