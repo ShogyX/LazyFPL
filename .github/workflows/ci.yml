@@ -4,6 +4,15 @@ on:
   push:
   pull_request:
 
+# Least privilege: CI only needs to read the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     runs-on: ubuntu-latest

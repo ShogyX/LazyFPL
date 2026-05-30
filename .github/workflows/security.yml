@@ -6,6 +6,10 @@ on:
   schedule:
     - cron: "0 6 * * 1"   # weekly Monday 06:00 UTC
 
+# Default to read-only; jobs that need more elevate explicitly.
+permissions:
+  contents: read
+
 jobs:
   codeql:
     name: CodeQL (${{ matrix.language }})
@@ -25,6 +29,17 @@ jobs:
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:${{ matrix.language }}"
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so the scan covers all commits
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   dependency-audit:
     name: Dependency audit

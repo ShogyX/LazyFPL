@@ -1,0 +1,8 @@
+# Default owner for everything in this repo — requested as a reviewer on PRs.
+* @ShogyX
+
+# Security-sensitive areas
+/.github/                       @ShogyX
+/src/fpl_engine/config.py       @ShogyX
+/src/fpl_engine/api/            @ShogyX
+SECURITY.md                     @ShogyX
