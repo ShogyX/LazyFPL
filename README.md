@@ -54,13 +54,22 @@ model registry), `serving` (predictions, recommendations, backtests), and `core`
 ```bash
 git clone https://github.com/ShogyX/LazyFPL.git
 cd LazyFPL
-./install.sh                    # venv, deps, frontend build (+ systemd templates)
-./install.sh --with-scheduler   # also install & enable the auto-refresh service
-cp .env.example .env            # fill in DB URL + optional API keys (install.sh does this too)
-alembic upgrade head            # apply DB migrations (needs Postgres running)
+./install.sh --with-scheduler   # fire-and-forget: provisions everything + starts services
 ```
 
-Requirements: **Python 3.11+**, **Node 18+**, **PostgreSQL 14+**.
+`install.sh` is self-provisioning on Debian/Ubuntu: it installs the system
+packages it needs (Python venv, **Node 20**, **PostgreSQL**), creates the database
+and role, sets up the virtualenv and Python deps, writes `.env`, applies
+migrations, builds the frontend, and (with `--with-scheduler`) installs and starts
+the auto-refresh + API systemd services. Run it as **root or with sudo** so it can
+install system packages. It's idempotent — safe to re-run.
+
+Flags: `--with-scheduler` (install & start services), `--no-system-deps` (skip
+apt/PostgreSQL/Node provisioning and use what's already installed).
+
+Requirements it installs for you (Debian/Ubuntu): **Python 3.11+**, **Node 18+**,
+**PostgreSQL**. On other systems install those yourself, then run
+`./install.sh --no-system-deps`.
 
 ## Running
 
