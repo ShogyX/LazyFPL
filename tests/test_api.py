@@ -12,6 +12,7 @@ from fpl_engine.db.models import (
     players,
     predictions_player_gw,
     recommendations,
+    targets,
     teams,
     tracked_entries,
     tracked_picks,
@@ -29,7 +30,7 @@ def client(sm):
 
 
 def _seed(sm):
-    players_rows, pred_rows = [], []
+    players_rows, pred_rows, target_rows = [], [], []
     pid = 0
     for pos, n in ((GK, 4), (DEF, 10), (MID, 10), (FWD, 6)):
         for _ in range(n):
@@ -41,11 +42,16 @@ def _seed(sm):
                               "player_key": pid, "element_id": pid, "element_type": pos,
                               "xp_next1": float(pid % 7) + 1.0, "xp_next6": 20.0,
                               "pred_minutes": 90.0})
+            # Realised points correlated with predicted xP so accuracy IC is high.
+            target_rows.append({"season": SEASON, "element_id": pid, "fixture_id": pid,
+                                "player_key": pid, "gw": GW, "element_type": pos,
+                                "actual_points": (pid % 7) + 2, "converter_version": "t1"})
     with sm() as s:
         s.execute(teams.insert(), [{"id": i, "name": f"Team{i}", "short_name": f"T{i}"}
                                    for i in range(1, 8)])
         s.execute(players.insert(), players_rows)
         s.execute(predictions_player_gw.insert(), pred_rows)
+        s.execute(targets.insert(), target_rows)
         s.execute(recommendations.insert(), [{
             "model_version": "v1", "entry_id": 7, "season": SEASON, "target_event": GW,
             "kind": "captain", "ev": 3.2, "confidence": 0.4,
@@ -203,3 +209,27 @@ def test_track_list_and_get(client):
 
 def test_track_get_404_for_unknown(client):
     assert client.get("/track/99999").status_code == 404
+
+
+# ---- F4+: predicted-vs-actual analytics ----------------------------------
+
+def test_accuracy_overall_and_breakdowns(client):
+    r = client.get(f"/accuracy?season={SEASON}&version=v1").json()
+    assert r["overall"]["n"] == 30 and r["overall"]["n_gws"] == 1
+    assert r["overall"]["ic"] is not None  # predicted & actual are correlated
+    assert {p["position"] for p in r["per_position"]} <= {"GK", "DEF", "MID", "FWD"}
+    assert len(r["calibration"]) >= 1
+
+
+def test_accuracy_empty_when_no_predictions(client):
+    r = client.get("/accuracy?season=1999-00&version=v1").json()
+    assert r["overall"] is None and r["per_gw"] == []
+
+
+def test_optimal_xi_history(client):
+    r = client.get(f"/optimal-xi?season={SEASON}&version=v1").json()
+    assert r["totals"]["n_gws"] == 1
+    g = r["gws"][0]
+    assert g["gw"] == GW
+    assert g["predicted_xi_xp"] > 0 and g["actual_points"] > 0
+    assert g["captain"] is not None

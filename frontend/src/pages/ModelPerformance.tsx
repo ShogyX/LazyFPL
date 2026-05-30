@@ -6,10 +6,13 @@ import {
 } from "recharts";
 import { Loader2, Search } from "lucide-react";
 import { PageHeader, Card } from "../components/Layout";
-import { api, type CompareRun, type PlayerPrediction, type PlayerSearchResult } from "../lib/api";
+import {
+  api, type Accuracy, type CompareRun, type HedgeWeights, type OptimalXi,
+  type PlayerPrediction, type PlayerSearchResult,
+} from "../lib/api";
 
-const PALETTE = ["#1e40af", "#d97706", "#15803d", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#65a30d"];
-type Tab = "comparison" | "trend" | "predictions" | "players";
+const PALETTE = ["#1e40af", "#d97706", "#15803d", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#0d9488", "#9333ea"];
+type Tab = "comparison" | "trend" | "predictions" | "accuracy" | "weights" | "players";
 
 export default function ModelPerformance() {
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.settings });
@@ -65,6 +68,8 @@ export default function ModelPerformance() {
         {tab === "comparison" && <Comparison runs={all.data!.runs} season={effSeason} picked={effPicked} />}
         {tab === "trend" && <Trend runs={all.data!.runs} season={effSeason} picked={effPicked} />}
         {tab === "predictions" && <Predictions season={effSeason} version={version} />}
+        {tab === "accuracy" && <AccuracyTab season={effSeason} version={version} />}
+        {tab === "weights" && <Weights season={effSeason} />}
         {tab === "players" && <Players season={effSeason} />}
       </div>
     </>
@@ -85,6 +90,8 @@ function Tabs({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
     ["comparison", "Season comparison"],
     ["trend", "Per-GW trend"],
     ["predictions", "Predictions"],
+    ["accuracy", "Predicted vs actual"],
+    ["weights", "Weight adaptation"],
     ["players", "Player search"],
   ];
   return (
@@ -257,6 +264,167 @@ function Predictions({ season, version }: { season: string; version: string }) {
         />
       )}
     </Card>
+  );
+}
+
+// ---- Predicted vs actual: accuracy, calibration, optimal-XI ----
+function AccuracyTab({ season, version }: { season: string; version: string }) {
+  const acc = useQuery({ queryKey: ["accuracy", season, version], queryFn: () => api.accuracy(season, version), enabled: !!season, retry: false });
+  const oxi = useQuery({ queryKey: ["optimal-xi", season, version], queryFn: () => api.optimalXi(season, version), enabled: !!season, retry: false });
+
+  if (acc.isLoading) return <Loading />;
+  if (acc.error) return <ErrorBox message={String(acc.error)} />;
+  const a = acc.data;
+  if (!a || !a.overall) return <Card title="Predicted vs actual"><Hint>No stored predictions for {season} ({version}). Live predictions exist only for recent gameweeks.</Hint></Card>;
+
+  return (
+    <div className="grid gap-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Kpi label="Rank IC" value={fmt(a.overall.ic)} />
+        <Kpi label="RMSE" value={fmt(a.overall.rmse)} />
+        <Kpi label="MAE" value={fmt(a.overall.mae)} />
+        <Kpi label="GWs / rows" value={`${a.overall.n_gws} / ${a.overall.n}`} />
+      </div>
+
+      <Card title="Per-GW accuracy">
+        <AccuracyChart data={a} />
+      </Card>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card title="Calibration (predicted vs realised)">
+          <CalibrationChart data={a} />
+          <p className="mt-2 text-xs text-muted-fg">Points by predicted-xP bucket; close to the diagonal means well-calibrated.</p>
+        </Card>
+        <Card title="Per-position accuracy">
+          <Table
+            head={["Pos", "n", "IC", "RMSE", "Bias"]}
+            rows={a.per_position.map((p) => [p.position, p.n, fmt(p.ic), fmt(p.rmse), fmt(p.bias)])}
+          />
+        </Card>
+      </div>
+
+      <Card title="Optimal XI — predicted vs actual">
+        {oxi.isLoading && <Loading />}
+        {oxi.data?.totals && <OptimalXiView data={oxi.data} />}
+        {oxi.data && !oxi.data.totals && <Hint>No optimal-XI history for {season}.</Hint>}
+      </Card>
+    </div>
+  );
+}
+
+function AccuracyChart({ data }: { data: Accuracy }) {
+  return (
+    <div className="h-72">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data.per_gw} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+          <XAxis dataKey="gw" tick={chartTick} />
+          <YAxis yAxisId="ic" domain={[0, 1]} tick={chartTick} width={36} />
+          <YAxis yAxisId="err" orientation="right" tick={chartTick} width={36} />
+          <Tooltip contentStyle={tooltipStyle} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          <Line yAxisId="ic" type="monotone" dataKey="ic" name="Rank IC" stroke={PALETTE[0]} strokeWidth={2} dot={{ r: 2 }} />
+          <Line yAxisId="err" type="monotone" dataKey="rmse" name="RMSE" stroke={PALETTE[3]} strokeWidth={2} dot={{ r: 2 }} />
+          <Line yAxisId="err" type="monotone" dataKey="mae" name="MAE" stroke={PALETTE[1]} strokeWidth={2} dot={{ r: 2 }} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function CalibrationChart({ data }: { data: Accuracy }) {
+  return (
+    <div className="h-72">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data.calibration} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+          <XAxis dataKey="bucket" tick={chartTick} />
+          <YAxis tick={chartTick} />
+          <Tooltip contentStyle={tooltipStyle} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          <Bar dataKey="mean_pred" name="Mean predicted" fill={PALETTE[0]} radius={[3, 3, 0, 0]} />
+          <Bar dataKey="mean_actual" name="Mean actual" fill={PALETTE[2]} radius={[3, 3, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function OptimalXiView({ data }: { data: OptimalXi }) {
+  const t = data.totals!;
+  const hitRate = t.sum_predicted ? (t.sum_actual / t.sum_predicted) * 100 : 0;
+  return (
+    <div className="grid gap-3">
+      <div className="grid grid-cols-3 gap-3">
+        <Kpi label="Σ predicted xP" value={t.sum_predicted.toFixed(1)} />
+        <Kpi label="Σ actual pts" value={t.sum_actual.toFixed(0)} />
+        <Kpi label="Realised %" value={`${hitRate.toFixed(0)}%`} />
+      </div>
+      <div className="h-72">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data.gws} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+            <XAxis dataKey="gw" tick={chartTick} />
+            <YAxis tick={chartTick} />
+            <Tooltip contentStyle={tooltipStyle} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Bar dataKey="predicted_xi_xp" name="Predicted XI xP" fill={PALETTE[0]} radius={[3, 3, 0, 0]} />
+            <Bar dataKey="actual_points" name="Actual points" fill={PALETTE[1]} radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <Table
+        head={["GW", "Pred XI xP", "Actual", "Captain", "C pred", "C actual"]}
+        rows={data.gws.map((g) => [g.gw, g.predicted_xi_xp.toFixed(1), g.actual_points.toFixed(0), g.captain ?? "—", g.captain_pred.toFixed(1), g.captain_actual.toFixed(0)])}
+      />
+    </div>
+  );
+}
+
+// ---- Online-Hedge member weight adaptation across a season ----
+function Weights({ season }: { season: string }) {
+  const { data, isLoading, error, isFetching } = useQuery({
+    queryKey: ["hedge-weights", season],
+    queryFn: () => api.hedgeWeights(season),
+    enabled: !!season,
+    retry: false,
+    staleTime: Infinity,
+  });
+  return (
+    <Card title={`Online-Hedge weight adaptation — ${season || "?"}`}>
+      <p className="mb-3 text-sm text-muted-fg">
+        How the adaptive ensemble re-weights its members as the season unfolds (leakage-safe: each GW’s
+        weights use only earlier results). First load replays the season and can take ~20s.
+      </p>
+      {(isLoading || isFetching) && <Loading />}
+      {error && <ErrorBox message={String(error)} />}
+      {data && !isFetching && (data.series.length === 0
+        ? <Hint>No feature panel for {season}.</Hint>
+        : <WeightsChart data={data} />)}
+    </Card>
+  );
+}
+
+function WeightsChart({ data }: { data: HedgeWeights }) {
+  const rows = data.series.map((s) => ({ gw: s.gw, ...s.weights }));
+  return (
+    <>
+      {data.train_season && <p className="mb-2 text-xs text-muted-fg">Seeded from {data.train_season} IC.</p>}
+      <div className="h-96">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+            <XAxis dataKey="gw" tick={chartTick} />
+            <YAxis domain={[0, "auto"]} tick={chartTick} />
+            <Tooltip contentStyle={tooltipStyle} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            {data.members.map((m, i) => (
+              <Line key={m} type="monotone" dataKey={m} stroke={PALETTE[i % PALETTE.length]} dot={false} strokeWidth={2} />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </>
   );
 }
 

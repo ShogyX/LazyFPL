@@ -173,6 +173,46 @@ export interface TrackedDetail extends TrackedEntry {
   picks: TrackedPick[];
 }
 
+export interface AccuracyGw {
+  gw: number;
+  n: number;
+  ic: number | null;
+  rmse: number | null;
+  mae: number | null;
+  mean_pred: number | null;
+  mean_actual: number | null;
+}
+
+export interface Accuracy {
+  season: string;
+  version: string;
+  per_gw: AccuracyGw[];
+  per_position: { position: string; n: number; ic: number | null; rmse: number | null; bias: number | null }[];
+  calibration: { bucket: string; n: number; mean_pred: number | null; mean_actual: number | null }[];
+  overall: { n: number; n_gws: number; ic: number | null; rmse: number | null; mae: number | null; bias: number | null } | null;
+}
+
+export interface OptimalXi {
+  season: string;
+  version: string;
+  gws: {
+    gw: number;
+    predicted_xi_xp: number;
+    actual_points: number;
+    captain: string | null;
+    captain_pred: number;
+    captain_actual: number;
+  }[];
+  totals: { sum_predicted: number; sum_actual: number; n_gws: number } | null;
+}
+
+export interface HedgeWeights {
+  eval_season: string;
+  train_season: string | null;
+  members: string[];
+  series: { gw: number; weights: Record<string, number> }[];
+}
+
 export interface PlannerResult {
   entry_id: number;
   season: string;
@@ -219,6 +259,12 @@ export const api = {
   // ---- player search ----
   searchPlayers: (q: string, season?: string, limit = 25) =>
     get<{ players: PlayerSearchResult[] }>("/players/search", { q, season, limit }),
+
+  // ---- predicted-vs-actual analytics ----
+  accuracy: (season: string, version = "v1") => get<Accuracy>("/accuracy", { season, version }),
+  optimalXi: (season: string, version = "v1") => get<OptimalXi>("/optimal-xi", { season, version }),
+  hedgeWeights: (evalSeason: string, trainSeason?: string, lo?: number, hi?: number) =>
+    get<HedgeWeights>("/hedge-weights", { eval_season: evalSeason, train_season: trainSeason, lo, hi }),
 
   // ---- tracking + planner ----
   trackedEntries: () => get<{ entries: TrackedEntry[] }>("/track"),

@@ -23,7 +23,7 @@ from ..db.models import (
     true_probabilities,
 )
 from ..optimise import SquadOptimizer, load_candidates
-from . import settings_store
+from . import analytics, settings_store
 
 _POS = ("GK", "DEF", "MID", "FWD")
 
@@ -381,6 +381,25 @@ def create_app() -> FastAPI:
             "bank": (bank or 0) / 10 if bank is not None else None,
             "rationale": rec.rationale,
         }
+
+    # ---- F4+: predicted-vs-actual analytics --------------------------------
+    @app.get("/accuracy")
+    def accuracy(season: str, version: str = "v1") -> dict:
+        # Per-GW rank IC / RMSE / MAE, per-position IC and a calibration curve,
+        # all from stored predictions joined to realised points.
+        return analytics.prediction_accuracy(season, version)
+
+    @app.get("/optimal-xi")
+    def optimal_xi(season: str, version: str = "v1",
+                   budget: int = Query(1000, ge=300, le=2000)) -> dict:
+        return analytics.optimal_xi_history(season, version, budget)
+
+    @app.get("/hedge-weights")
+    def hedge_weights_endpoint(eval_season: str, train_season: str | None = None,
+                               lo: int = Query(1, ge=1, le=38),
+                               hi: int = Query(38, ge=1, le=38)) -> dict:
+        # Heavy on first call (replays a season of frames); memoised thereafter.
+        return analytics.hedge_weights(eval_season, train_season, lo, hi)
 
     return app
 
