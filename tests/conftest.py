@@ -15,6 +15,14 @@ from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
+from fpl_engine.config import Settings, get_settings  # noqa: E402
+
+# Hermetic settings: ignore any local `.env` so a developer's real keys/cookies
+# never leak into tests (otherwise e.g. a populated FPL_API_FOOTBALL_KEY breaks
+# the ingest/secret tests, masking the true CI result).
+Settings.model_config["env_file"] = None
+get_settings.cache_clear()
+
 from fpl_engine.db.engine import get_engine, get_sessionmaker  # noqa: E402
 
 _TABLES = (

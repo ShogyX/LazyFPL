@@ -37,4 +37,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the repo root on sys.path so cross-test imports like
+# `from tests.test_panel import _pipeline` resolve under a bare `pytest`
+# invocation (CI), not just `python -m pytest`.
+pythonpath = ["."]
 filterwarnings = ["ignore::DeprecationWarning"]

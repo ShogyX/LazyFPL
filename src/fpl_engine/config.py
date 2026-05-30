@@ -21,6 +21,10 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Treat empty env vars (e.g. the blank `FPL_FPL_ENTRY_ID=` shipped in
+        # .env.example) as unset, so they fall back to defaults instead of
+        # failing int/typed parsing at startup.
+        env_ignore_empty=True,
     )
 
     env: str = "dev"
