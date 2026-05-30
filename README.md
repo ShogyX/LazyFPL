@@ -1,0 +1,106 @@
+# LazyFPL — FPL Intelligence Engine
+
+A self-hosted Fantasy Premier League prediction & optimisation service. It ingests
+historical and live FPL data, predicts expected points per player per gameweek with
+an ensemble of models, optimises squads/transfers/captaincy under the real FPL rules
+via MILP, and serves it all through a FastAPI read API and a React dashboard.
+
+> Single-operator, runs entirely on your own machine. Secrets stay server-side and
+> are never logged.
+
+## Features
+
+- **Component-wise expected points (xP)** — minutes, goals, assists, clean sheets
+  (Dixon–Coles), bonus, defensive contribution, all combined per position.
+- **Ensemble models** — IC-weighted / per-position / rank z-blends, a Ridge stacking
+  meta-learner, an **online Hedge** blend that re-weights members from realised
+  results, and decorrelation-aware member selection. Recency-weighted so fresher
+  data counts more.
+- **Optimisation (MILP / CBC)** — squad + XI selection, multi-GW transfer planning
+  with free-transfer value and future-GW decay, **value-aware budgeting** (tracks
+  bank + sell value as prices drift), captaincy and chips (Triple Captain, Bench
+  Boost, Free Hit).
+- **Availability-aware** — injured/suspended/doubtful players are gated out of
+  selections and transfers.
+- **Leakage-disciplined backtester** — train season ≠ eval season, strictly causal
+  features, autosubs + vice-captain + chip realism, multi-season validation.
+- **React dashboard** — three pages: Settings, Team Planner (FPL-style pitch), and
+  Model Performance (season/GW comparison, predicted-vs-actual accuracy, calibration,
+  optimal-XI realised, online-hedge weight adaptation, player search).
+
+## Architecture
+
+```
+src/fpl_engine/
+  ingest/       data sources (FPL, Understat, FBref, API-Football, odds, elite, entry)
+  store/ resolve/ features/   normalisation, identity crosswalk, feature panels
+  model/        predictors, ensembles, stacking, components, minutes, analysis
+  optimise/     squad / transfer / value-step / chips MILP
+  backtest/     leakage-safe walk-forward engine
+  api/          FastAPI read API (app.py), settings store, analytics
+  cli.py        `fpl` command-line entry
+migrations/     Alembic (Postgres: raw / normalised / feature / study / serving / core)
+frontend/       React + Vite + TypeScript + Tailwind + Recharts dashboard
+tests/          pytest suite
+```
+
+Data lives in Postgres across layered schemas: `raw` (immutable snapshots),
+`normalised` (typed facts), `feature` (model inputs), `study` (validity artefacts +
+model registry), `serving` (predictions, recommendations, backtests), and `core`
+(operational + app settings).
+
+## Quick start
+
+```bash
+git clone https://github.com/ShogyX/LazyFPL.git
+cd LazyFPL
+./install.sh            # creates venv, installs deps, builds the frontend
+cp .env.example .env    # fill in DB URL + optional API keys (install.sh does this too)
+alembic upgrade head    # apply DB migrations (needs Postgres running)
+```
+
+Requirements: **Python 3.11+**, **Node 18+**, **PostgreSQL 14+**.
+
+## Running
+
+```bash
+# Backend read API (http://localhost:8000)
+uvicorn fpl_engine.api.app:app --reload --port 8000
+
+# Frontend dev server (http://localhost:5173, proxies /api -> :8000)
+cd frontend && npm run dev
+```
+
+CLI examples:
+
+```bash
+fpl --help
+fpl backtest --season 2024-25 --strategy ict          # backtest a strategy
+fpl recommend --entry <id> --season 2024-25 --from-gw 30
+fpl track --entry <id>                                  # pull & save your team
+```
+
+## Configuration
+
+All settings load from environment variables (prefix `FPL_`) or `.env`; see
+[`.env.example`](.env.example). The Settings page can also manage config and secrets
+at runtime — stored server-side in `core.app_settings`, write-only, and never
+returned in plaintext. Stored secrets override env values.
+
+Secrets are typed `SecretStr` and scrubbed from logs. **Never commit `.env`.** See
+[`SECURITY.md`](SECURITY.md).
+
+## Testing
+
+```bash
+pytest -q                       # backend (needs a Postgres test DB: fpl_test)
+cd frontend && npm run build    # frontend type-check + build
+```
+
+CI runs the backend suite against a Postgres service container and type-checks /
+builds the frontend on every push and PR (`.github/workflows/ci.yml`). Security
+scanning (CodeQL + dependency audit) runs in `.github/workflows/security.yml`.
+
+## License
+
+Private project. Not affiliated with the Premier League or the official FPL game.
