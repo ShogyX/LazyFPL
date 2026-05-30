@@ -21,14 +21,16 @@ for arg in "$@"; do
     --with-scheduler) WITH_SCHEDULER=1 ;;
     --no-system-deps) NO_SYSTEM_DEPS=1 ;;
     --bootstrap)      BOOTSTRAP=on ;;
+    --bootstrap-bg)   BOOTSTRAP=bg ;;
     --no-bootstrap)   BOOTSTRAP=off ;;
     -h|--help)
       cat <<'USAGE'
-Usage: ./install.sh [--with-scheduler] [--no-system-deps] [--bootstrap|--no-bootstrap]
+Usage: ./install.sh [--with-scheduler] [--no-system-deps] [--bootstrap|--bootstrap-bg|--no-bootstrap]
   --with-scheduler   install & enable the auto-refresh + API services
   --no-system-deps   skip apt/PostgreSQL/Node provisioning (use what's installed)
-  --bootstrap        force the one-time history backfill + model training
-  --no-bootstrap     skip it (default runs it automatically only when no model exists)
+  --bootstrap        force the one-time history backfill + model training (foreground)
+  --bootstrap-bg     run that backfill detached (logs to bootstrap.log)
+  --no-bootstrap     skip it (default: runs in the foreground when no model exists yet)
 USAGE
       exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
@@ -177,11 +179,10 @@ else
   warn "Migrations failed — check PostgreSQL is running and FPL_DATABASE_URL in .env, then: alembic upgrade head"
 fi
 
-# --- one-time history backfill + model training (background) ----------------
-# The scheduler keeps the CURRENT season fresh, but a fresh DB has no historical
-# data and no trained model, so the app would be empty. Run `fpl bootstrap` once
-# (acquire all seasons -> features -> study -> freeze v1 -> predict). It's heavy
-# (10-30+ min) so we launch it in the background and log to bootstrap.log.
+# Decide whether the one-time backfill is needed (the actual run happens at the
+# end, once the UI + services are set up). A fresh DB has no historical data and
+# no trained model, so without this the app comes up empty.
+DO_BOOTSTRAP=0
 if [ "$MIGRATED" -eq 1 ] && [ "$BOOTSTRAP" != "off" ]; then
   HAVE_MODEL="$(python - <<'PY' 2>/dev/null || echo 0
 from sqlalchemy import create_engine, text
@@ -194,10 +195,8 @@ except Exception:
     print(0)
 PY
 )"
-  if [ "$BOOTSTRAP" = "on" ] || [ "${HAVE_MODEL:-0}" = "0" ]; then
-    info "Starting one-time history backfill + model training in the background -> bootstrap.log"
-    nohup "$REPO_DIR/.venv/bin/fpl" bootstrap >>"$REPO_DIR/bootstrap.log" 2>&1 &
-    info "Backfill running (10-30+ min). Watch it: tail -f $REPO_DIR/bootstrap.log"
+  if [ "$BOOTSTRAP" = "on" ] || [ "$BOOTSTRAP" = "bg" ] || [ "${HAVE_MODEL:-0}" = "0" ]; then
+    DO_BOOTSTRAP=1
   else
     info "Model already trained (study.model_registry has v1) — skipping bootstrap."
   fi
@@ -254,6 +253,26 @@ if [ "$WITH_SCHEDULER" -eq 1 ]; then
   else
     warn "systemd not available — run manually: source .venv/bin/activate && fpl schedule"
     warn "(System units are in deploy/ for later: sudo cp deploy/*.service /etc/systemd/system/)"
+  fi
+fi
+
+# --- one-time history backfill + model training ----------------------------
+# Run as the final install step so the UI + services are already in place. The
+# app needs historical data and a trained model to be useful; this provides
+# both. It's heavy (10-30+ min) but part of the install by design — use
+# --bootstrap-bg to detach it, or --no-bootstrap to skip.
+if [ "$DO_BOOTSTRAP" -eq 1 ]; then
+  if [ "$BOOTSTRAP" = "bg" ]; then
+    info "Backfilling history + training the model in the background -> bootstrap.log"
+    nohup "$REPO_DIR/.venv/bin/fpl" bootstrap >>"$REPO_DIR/bootstrap.log" 2>&1 &
+    info "Running detached (10-30+ min). Watch it: tail -f $REPO_DIR/bootstrap.log"
+  else
+    info "Backfilling all seasons + training the model (one-time, 10-30+ min)…"
+    fpl bootstrap | tee -a "$REPO_DIR/bootstrap.log" || warn "bootstrap reported errors — see bootstrap.log; you can re-run: fpl bootstrap"
+    # If services are already running, restart the API so it picks up the model.
+    if [ "$WITH_SCHEDULER" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
+      $SUDO systemctl restart lazyfpl-api 2>/dev/null || true
+    fi
   fi
 fi
 
