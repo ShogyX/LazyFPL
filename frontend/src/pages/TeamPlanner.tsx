@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowRightLeft, Crown, Download, Loader2, Sparkles } from "lucide-react";
+import { ArrowRightLeft, Check, Crown, Download, Sparkles } from "lucide-react";
 import { PageHeader, Card } from "../components/Layout";
 import Pitch, { type PitchPlayer } from "../components/Pitch";
+import { Button, Mini, Spinner, TextInput } from "../components/ui";
 import { api, type PlannerResult, type Squad, type TrackedDetail } from "../lib/api";
 
 export default function TeamPlanner() {
@@ -64,23 +65,24 @@ function ControlBar(props: {
   return (
     <div className="flex flex-wrap items-end gap-2">
       <Mini label="Entry id">
-        <input className={inputCls} style={{ width: 110 }} inputMode="numeric" value={props.entry} onChange={(e) => props.onEntry(e.target.value)} />
+        <TextInput style={{ width: 110 }} inputMode="numeric" value={props.entry} onChange={(e) => props.onEntry(e.target.value)} />
       </Mini>
       <Mini label="Season">
-        <input className={inputCls} style={{ width: 100 }} placeholder="2024-25" value={props.season} onChange={(e) => props.onSeason(e.target.value)} />
+        <TextInput style={{ width: 100 }} placeholder="2024-25" value={props.season} onChange={(e) => props.onSeason(e.target.value)} />
       </Mini>
       <Mini label="GW">
-        <input className={inputCls} style={{ width: 64 }} type="number" min={1} max={38} value={props.gw} onChange={(e) => props.onGw(Number(e.target.value))} />
+        <TextInput style={{ width: 64 }} type="number" min={1} max={38} value={props.gw} onChange={(e) => props.onGw(Number(e.target.value))} />
       </Mini>
-      <button
-        className={btnCls}
-        disabled={props.entry === "" || track.isPending}
+      <Button
+        loading={track.isPending}
+        done={track.isSuccess}
+        icon={track.isSuccess ? <Check className="h-4 w-4" /> : <Download className="h-4 w-4" />}
+        disabled={props.entry === ""}
         onClick={() => track.mutate(Number(props.entry))}
         title="Pull the latest roster + prices from FPL and save for daily tracking"
       >
-        {track.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
         {track.isSuccess ? "Tracked" : "Track"}
-      </button>
+      </Button>
       {track.isError && <span className="text-xs text-destructive">{String(track.error)}</span>}
     </div>
   );
@@ -198,7 +200,7 @@ function PlannerBody({ data }: { data: PlannerResult }) {
 function splitTracked(d: TrackedDetail): { starters: PitchPlayer[]; bench: PitchPlayer[] } {
   const map = (p: TrackedDetail["picks"][number]): PitchPlayer => ({
     id: p.element_id, name: p.name ?? String(p.element_id), position: p.position,
-    captain: p.captain, vice: p.vice,
+    code: p.code, captain: p.captain, vice: p.vice,
   });
   const starters = d.picks.filter((p) => (p.slot ?? 99) <= 11).map(map);
   const bench = d.picks.filter((p) => (p.slot ?? 0) > 11).map(map);
@@ -206,26 +208,15 @@ function splitTracked(d: TrackedDetail): { starters: PitchPlayer[]; bench: Pitch
 }
 
 function splitSquad(s: Squad): { starters: PitchPlayer[]; bench: PitchPlayer[] } {
-  const map = (p: Squad["picks"][number], i: number): PitchPlayer => ({
-    id: i, name: p.name, position: p.position, captain: p.captain, vice: p.vice,
+  const map = (p: Squad["picks"][number]): PitchPlayer => ({
+    id: p.element_id, name: p.name, position: p.position, code: p.code,
+    captain: p.captain, vice: p.vice,
     meta: `£${p.price.toFixed(1)} · ${p.xp.toFixed(1)}`,
   });
   return {
     starters: s.picks.filter((p) => p.start).map(map),
     bench: s.picks.filter((p) => !p.start).map(map),
   };
-}
-
-const inputCls = "rounded-md border border-border bg-bg px-2 py-1.5 text-sm text-fg outline-none focus:ring-2 focus:ring-ring";
-const btnCls = "inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-on-primary transition hover:opacity-90 disabled:opacity-50";
-
-function Mini({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="grid gap-0.5">
-      <span className="text-[11px] font-medium uppercase tracking-wide text-muted-fg">{label}</span>
-      {children}
-    </label>
-  );
 }
 
 function Stat({ label, value }: { label: string; value: React.ReactNode }) {
@@ -237,9 +228,7 @@ function Stat({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function Loading() {
-  return <div className="flex items-center gap-2 text-sm text-muted-fg"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>;
-}
+const Loading = Spinner;
 function Hint({ children }: { children: React.ReactNode }) {
   return <p className="text-sm text-muted-fg">{children}</p>;
 }

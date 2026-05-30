@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, ResponsiveContainer,
   Tooltip, XAxis, YAxis,
 } from "recharts";
-import { Loader2, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { PageHeader, Card } from "../components/Layout";
+import PlayerAvatar from "../components/PlayerAvatar";
+import { Chip, ErrorBox, Mini, Select, Spinner, TextInput } from "../components/ui";
 import {
   api, type Accuracy, type CompareRun, type HedgeWeights, type OptimalXi,
   type PlayerPrediction, type PlayerSearchResult,
@@ -39,24 +41,24 @@ export default function ModelPerformance() {
       <Hdr />
       <div className="mb-4 flex flex-wrap items-end gap-3">
         <Mini label="Season">
-          <select className={inputCls} value={effSeason} onChange={(e) => setSeason(e.target.value)}>
-            {seasons.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
+          <div style={{ width: 130 }}>
+            <Select value={effSeason} onChange={(e) => setSeason(e.target.value)}>
+              {seasons.map((s) => <option key={s} value={s}>{s}</option>)}
+            </Select>
+          </div>
         </Mini>
         <div className="flex flex-wrap gap-1">
           {strategies.map((s, i) => {
             const on = effPicked.includes(s);
             return (
-              <button
+              <Chip
                 key={s}
+                active={on}
+                color={PALETTE[i % PALETTE.length]}
                 onClick={() => setPicked(on ? effPicked.filter((x) => x !== s) : [...effPicked, s])}
-                className={`rounded-full border px-2.5 py-1 text-xs transition ${
-                  on ? "border-transparent text-on-primary" : "border-border text-muted-fg hover:text-fg"
-                }`}
-                style={on ? { background: PALETTE[i % PALETTE.length] } : undefined}
               >
                 {s}
-              </button>
+              </Chip>
             );
           })}
         </div>
@@ -182,10 +184,10 @@ function Trend({ runs, season, picked }: { runs: CompareRun[]; season: string; p
     <Card title={`Cumulative points — ${season}`}>
       <div className="mb-3 flex items-end gap-3">
         <Mini label={`From GW (min ${minGw})`}>
-          <input className={inputCls} style={{ width: 90 }} type="number" min={minGw} max={maxGw} value={lo} placeholder={String(minGw)} onChange={(e) => setLo(e.target.value === "" ? "" : Number(e.target.value))} />
+          <TextInput style={{ width: 90 }} type="number" min={minGw} max={maxGw} value={lo} placeholder={String(minGw)} onChange={(e) => setLo(e.target.value === "" ? "" : Number(e.target.value))} />
         </Mini>
         <Mini label={`To GW (max ${maxGw})`}>
-          <input className={inputCls} style={{ width: 90 }} type="number" min={minGw} max={maxGw} value={hi} placeholder={String(maxGw)} onChange={(e) => setHi(e.target.value === "" ? "" : Number(e.target.value))} />
+          <TextInput style={{ width: 90 }} type="number" min={minGw} max={maxGw} value={hi} placeholder={String(maxGw)} onChange={(e) => setHi(e.target.value === "" ? "" : Number(e.target.value))} />
         </Mini>
       </div>
       <div className="h-80">
@@ -220,6 +222,7 @@ function Predictions({ season, version }: { season: string; version: string }) {
     queryFn: () => api.predictions(season, gw, version, pos === "" ? undefined : pos, 1000),
     enabled: !!season,
     retry: false,
+    placeholderData: keepPreviousData,
   });
 
   const players = (data?.players ?? [])
@@ -231,21 +234,23 @@ function Predictions({ season, version }: { season: string; version: string }) {
   return (
     <Card title={`Predictions — ${season || "?"} (${version})`}>
       <div className="mb-3 flex flex-wrap items-end gap-3">
-        <Mini label="GW"><input className={inputCls} style={{ width: 64 }} type="number" min={1} max={38} value={gw} onChange={(e) => setGw(Number(e.target.value))} /></Mini>
+        <Mini label="GW"><TextInput style={{ width: 64 }} type="number" min={1} max={38} value={gw} onChange={(e) => setGw(Number(e.target.value))} /></Mini>
         <Mini label="Position">
-          <select className={inputCls} value={pos} onChange={(e) => setPos(e.target.value === "" ? "" : Number(e.target.value))}>
-            <option value="">All</option><option value={1}>GK</option><option value={2}>DEF</option><option value={3}>MID</option><option value={4}>FWD</option>
-          </select>
+          <div style={{ width: 96 }}>
+            <Select value={pos} onChange={(e) => setPos(e.target.value === "" ? "" : Number(e.target.value))}>
+              <option value="">All</option><option value={1}>GK</option><option value={2}>DEF</option><option value={3}>MID</option><option value={4}>FWD</option>
+            </Select>
+          </div>
         </Mini>
         <Mini label="Sort by">
-          <select className={inputCls} value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
-            <option value="xp_next1">xP next</option><option value="xp_next6">xP next-6</option><option value="price">Price</option><option value="pred_minutes">Pred mins</option>
-          </select>
+          <div style={{ width: 130 }}>
+            <Select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
+              <option value="xp_next1">xP next</option><option value="xp_next6">xP next-6</option><option value="price">Price</option><option value="pred_minutes">Pred mins</option>
+            </Select>
+          </div>
         </Mini>
-        <Mini label="Filter">
-          <input className={inputCls} placeholder="name / team" value={q} onChange={(e) => setQ(e.target.value)} />
-        </Mini>
-        <label className="flex items-center gap-1.5 text-sm text-fg">
+        <Mini label="Filter"><TextInput style={{ width: 150 }} placeholder="name / team" value={q} onChange={(e) => setQ(e.target.value)} /></Mini>
+        <label className="flex cursor-pointer items-center gap-1.5 text-sm text-fg">
           <input type="checkbox" className="h-4 w-4 accent-[var(--color-primary)]" checked={byTeam} onChange={(e) => setByTeam(e.target.checked)} /> By team
         </label>
       </div>
@@ -269,8 +274,8 @@ function Predictions({ season, version }: { season: string; version: string }) {
 
 // ---- Predicted vs actual: accuracy, calibration, optimal-XI ----
 function AccuracyTab({ season, version }: { season: string; version: string }) {
-  const acc = useQuery({ queryKey: ["accuracy", season, version], queryFn: () => api.accuracy(season, version), enabled: !!season, retry: false });
-  const oxi = useQuery({ queryKey: ["optimal-xi", season, version], queryFn: () => api.optimalXi(season, version), enabled: !!season, retry: false });
+  const acc = useQuery({ queryKey: ["accuracy", season, version], queryFn: () => api.accuracy(season, version), enabled: !!season, retry: false, placeholderData: keepPreviousData });
+  const oxi = useQuery({ queryKey: ["optimal-xi", season, version], queryFn: () => api.optimalXi(season, version), enabled: !!season, retry: false, placeholderData: keepPreviousData });
 
   if (acc.isLoading) return <Loading />;
   if (acc.error) return <ErrorBox message={String(acc.error)} />;
@@ -449,8 +454,8 @@ function Players({ season }: { season: string }) {
     <div className="grid gap-4 lg:grid-cols-2">
       <Card title="Search">
         <div className="relative mb-3">
-          <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-fg" />
-          <input className={`${inputCls} w-full pl-8`} placeholder="Type a player name…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-muted-fg" />
+          <TextInput className="pl-8" placeholder="Type a player name…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
         {search.isFetching && <Loading />}
         {search.data && (
@@ -459,8 +464,9 @@ function Players({ season }: { season: string }) {
               <li key={p.element_id}>
                 <button
                   onClick={() => setSel(p)}
-                  className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition hover:bg-muted ${sel?.element_id === p.element_id ? "bg-muted" : ""}`}
+                  className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition duration-150 hover:bg-muted ${sel?.element_id === p.element_id ? "bg-muted ring-1 ring-primary/40" : ""}`}
                 >
+                  <PlayerAvatar code={p.code} position={p.position} size={32} />
                   <span className="font-medium text-fg">{p.name}</span>
                   <span className="text-xs text-muted-fg">{p.team} · {p.position} · £{p.price.toFixed(1)}</span>
                   <span className="tnum ml-auto text-xs text-muted-fg">
@@ -476,7 +482,8 @@ function Players({ season }: { season: string }) {
         {!sel && <Hint>Select a player to see per-model xP and gameweek history.</Hint>}
         {sel && (
           <div className="grid gap-3">
-            <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+              <PlayerAvatar code={sel.code} position={sel.position} size={56} />
               {Object.entries(sel.predictions).map(([v, d]) => (
                 <Stat key={v} label={`${v} xP (GW${d.gw})`} value={fmt(d.xp_next1)} />
               ))}
@@ -523,18 +530,9 @@ function fmt(v: number | null | undefined, d = 2): string {
   return v == null ? "—" : v.toFixed(d);
 }
 
-const inputCls = "rounded-md border border-border bg-bg px-2 py-1.5 text-sm text-fg outline-none focus:ring-2 focus:ring-ring";
 const chartTick = { fontSize: 11, fill: "var(--color-muted-foreground)" };
 const tooltipStyle = { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 12, color: "var(--color-foreground)" };
 
-function Mini({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="grid gap-0.5">
-      <span className="text-[11px] font-medium uppercase tracking-wide text-muted-fg">{label}</span>
-      {children}
-    </label>
-  );
-}
 function Kpi({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="rounded-card border border-border bg-surface p-3">
@@ -571,12 +569,7 @@ function Table({ head, rows }: { head: string[]; rows: (string | number)[][] }) 
     </div>
   );
 }
-function Loading() {
-  return <div className="flex items-center gap-2 text-sm text-muted-fg"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>;
-}
+const Loading = Spinner;
 function Hint({ children }: { children: React.ReactNode }) {
   return <p className="text-sm text-muted-fg">{children}</p>;
-}
-function ErrorBox({ message }: { message: string }) {
-  return <div className="rounded-md border border-destructive bg-surface px-3 py-2 text-sm text-destructive">{message}</div>;
 }

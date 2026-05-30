@@ -48,7 +48,7 @@ def create_app() -> FastAPI:
         p, pl, t = predictions_player_gw.c, players.c, teams.c
         stmt = (
             select(p.element_id, pl.web_name, p.element_type, p.xp_next1,
-                   p.xp_next6, p.pred_minutes, pl.now_cost, pl.status, t.short_name)
+                   p.xp_next6, p.pred_minutes, pl.now_cost, pl.status, pl.code, t.short_name)
             .select_from(
                 predictions_player_gw.join(players, p.element_id == pl.id)
                 .join(teams, pl.team_id == t.id, isouter=True))
@@ -64,6 +64,7 @@ def create_app() -> FastAPI:
                 "players": [{
                     "element_id": r.element_id, "name": r.web_name,
                     "position": _pos(r.element_type), "team": r.short_name,
+                    "code": r.code,
                     "xp_next1": _f(r.xp_next1), "xp_next6": _f(r.xp_next6),
                     "pred_minutes": _f(r.pred_minutes),
                     "price": (r.now_cost or 0) / 10, "status": r.status,
@@ -82,13 +83,16 @@ def create_app() -> FastAPI:
         sol = SquadOptimizer(budget=budget, eo_weight=eo_weight).solve(cands)
         if not sol.feasible:
             raise HTTPException(422, f"optimiser status: {sol.status}")
+        meta = _player_meta(sm, [p.id for p in sol.picks])
         result = {
             "season": season, "gw": gw, "status": sol.status,
             "total_cost": sol.total_cost / 10, "xi_xp": sol.xi_xp,
             "formation": {_POS[k - 1]: v for k, v in sol.formation.items()},
             "picks": [{
-                "name": p.name, "position": _pos(p.position), "price": p.price / 10,
-                "xp": round(p.xp, 2), "start": p.is_start,
+                "element_id": p.id, "name": p.name, "position": _pos(p.position),
+                "code": meta.get(p.id, (None, None))[0],
+                "team": meta.get(p.id, (None, None))[1],
+                "price": p.price / 10, "xp": round(p.xp, 2), "start": p.is_start,
                 "captain": p.is_captain, "vice": p.is_vice,
             } for p in sorted(sol.picks, key=lambda x: (not x.is_start, x.position))],
         }
@@ -240,7 +244,7 @@ def create_app() -> FastAPI:
         like = f"%{q.lower()}%"
         stmt = (
             select(pl.id, pl.web_name, pl.first_name, pl.second_name,
-                   pl.element_type, pl.now_cost, pl.status, t.short_name)
+                   pl.element_type, pl.now_cost, pl.status, pl.code, t.short_name)
             .select_from(players.join(teams, pl.team_id == t.id, isouter=True))
             .where(or_(func.lower(pl.web_name).like(like),
                        func.lower(func.concat(pl.first_name, " ", pl.second_name)).like(like)))
@@ -270,7 +274,7 @@ def create_app() -> FastAPI:
                     "element_id": r.id, "name": r.web_name,
                     "full_name": f"{r.first_name or ''} {r.second_name or ''}".strip(),
                     "team": r.short_name, "position": _pos(r.element_type),
-                    "price": (r.now_cost or 0) / 10, "status": r.status,
+                    "code": r.code, "price": (r.now_cost or 0) / 10, "status": r.status,
                     "predictions": preds,
                 })
         return {"query": q, "players": out}
@@ -303,9 +307,11 @@ def create_app() -> FastAPI:
             event = head["current_event"]
             picks = s.execute(
                 select(tp.element_id, tp.slot, tp.multiplier, tp.is_captain,
-                       tp.is_vice, players.c.web_name, players.c.element_type)
-                .select_from(tracked_picks.join(
-                    players, tp.element_id == players.c.id, isouter=True))
+                       tp.is_vice, players.c.web_name, players.c.element_type,
+                       players.c.code, teams.c.short_name)
+                .select_from(tracked_picks
+                    .join(players, tp.element_id == players.c.id, isouter=True)
+                    .join(teams, players.c.team_id == teams.c.id, isouter=True))
                 .where(tp.entry_id == entry_id, tp.event == event)
                 .order_by(tp.slot)
             ).all()
@@ -316,8 +322,8 @@ def create_app() -> FastAPI:
             "total_points": head["total_points"], "overall_rank": head["overall_rank"],
             "picks": [{
                 "element_id": p.element_id, "name": p.web_name,
-                "position": _pos(p.element_type), "slot": p.slot,
-                "multiplier": p.multiplier, "captain": p.is_captain,
+                "position": _pos(p.element_type), "code": p.code, "team": p.short_name,
+                "slot": p.slot, "multiplier": p.multiplier, "captain": p.is_captain,
                 "vice": p.is_vice,
             } for p in picks],
         }
@@ -410,6 +416,20 @@ def _f(v) -> float | None:
 
 def _iso(v) -> str | None:
     return v.isoformat() if v is not None else None
+
+
+def _player_meta(sm, ids: list[int]) -> dict[int, tuple[int | None, str | None]]:
+    """{element_id: (photo_code, team_short)} for rendering player images."""
+    if not ids:
+        return {}
+    pl, t = players.c, teams.c
+    with sm() as s:
+        rows = s.execute(
+            select(pl.id, pl.code, t.short_name)
+            .select_from(players.join(teams, pl.team_id == t.id, isouter=True))
+            .where(pl.id.in_(set(ids)))
+        ).all()
+    return {int(r.id): (r.code, r.short_name) for r in rows}
 
 
 app = create_app()

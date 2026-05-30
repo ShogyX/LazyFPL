@@ -42,6 +42,7 @@ export interface PlayerPrediction {
   name: string;
   position: Position | null;
   team: string | null;
+  code: number | null;
   xp_next1: number | null;
   xp_next6: number | null;
   pred_minutes: number | null;
@@ -50,8 +51,11 @@ export interface PlayerPrediction {
 }
 
 export interface SquadPick {
+  element_id: number;
   name: string;
   position: Position | null;
+  code: number | null;
+  team: string | null;
   price: number;
   xp: number;
   start: boolean;
@@ -143,6 +147,7 @@ export interface PlayerSearchResult {
   full_name: string;
   team: string | null;
   position: Position | null;
+  code: number | null;
   price: number;
   status: string | null;
   predictions: Record<string, { season: string; gw: number; xp_next1: number | null; xp_next6: number | null }>;
@@ -163,6 +168,8 @@ export interface TrackedPick {
   element_id: number;
   name: string | null;
   position: Position | null;
+  code: number | null;
+  team: string | null;
   slot: number | null;
   multiplier: number | null;
   captain: boolean;
