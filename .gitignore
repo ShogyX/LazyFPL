@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+*.egg-info/
+.pytest_cache/
+.cache/
+dist/
+build/
+
+# Node / frontend
+node_modules/
+*.tsbuildinfo
+.vite/
+
+# OS / editor
+.DS_Store

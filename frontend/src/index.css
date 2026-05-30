@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Data-Dense Dashboard tokens (ui-ux-pro-max recommendation, WCAG-AA). */
+:root {
+  --color-primary: #1e40af;
+  --color-on-primary: #ffffff;
+  --color-secondary: #3b82f6;
+  --color-accent: #d97706;
+  --color-background: #f8fafc;
+  --color-surface: #ffffff;
+  --color-foreground: #1e293b;
+  --color-muted: #e9eef6;
+  --color-muted-foreground: #64748b;
+  --color-border: #dbeafe;
+  --color-positive: #15803d;
+  --color-destructive: #dc2626;
+  --color-ring: #1e40af;
+  --color-pitch: #1f7a44;
+}
+
+.dark {
+  --color-primary: #60a5fa;
+  --color-on-primary: #0b1220;
+  --color-secondary: #3b82f6;
+  --color-accent: #f59e0b;
+  --color-background: #0b1220;
+  --color-surface: #111a2e;
+  --color-foreground: #e2e8f0;
+  --color-muted: #1e293b;
+  --color-muted-foreground: #94a3b8;
+  --color-border: #1e293b;
+  --color-positive: #4ade80;
+  --color-destructive: #f87171;
+  --color-ring: #60a5fa;
+  --color-pitch: #14532d;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: "Fira Sans", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tabular numbers everywhere data is shown. */
+.tnum {
+  font-feature-settings: "tnum";
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
