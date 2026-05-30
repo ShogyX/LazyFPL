@@ -133,7 +133,11 @@ if [ "$PROVISION" -eq 1 ] && { [ "$DB_HOST" = "localhost" ] || [ "$DB_HOST" = "1
     fi
     for db in "$DB_NAME" "${DB_NAME}_test"; do
       if [ "$(psql_su "SELECT 1 FROM pg_database WHERE datname='${db}'")" != "1" ]; then
-        $SUDO -u postgres createdb -O "$DB_USER" "$db" >/dev/null 2>&1 || warn "could not create db ${db}"
+        # Force UTF8 via template0 — FPL data has non-ASCII names; a SQL_ASCII
+        # database (the default on C/POSIX-locale boxes) would reject them.
+        $SUDO -u postgres createdb -O "$DB_USER" -E UTF8 -T template0 \
+              --lc-collate=C --lc-ctype=C "$db" >/dev/null 2>&1 \
+          || warn "could not create db ${db}"
       fi
     done
   fi
