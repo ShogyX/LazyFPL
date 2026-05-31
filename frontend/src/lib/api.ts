@@ -226,6 +226,16 @@ export interface HedgeWeights {
   series: { gw: number; weights: Record<string, number> }[];
 }
 
+export interface TickerItem {
+  kind: "live" | "ft" | "price" | "news";
+  a?: string | null; b?: string | null; as_?: number | null; bs?: number | null; min?: string;
+  dir?: "up" | "down"; name?: string; val?: string; delta?: string; note?: string;
+}
+
+export interface ChipSuggestion {
+  key: string; name: string; best_gw: number | null; ev: number | null; note: string;
+}
+
 export interface PlannerResult {
   entry_id: number;
   season: string;
@@ -278,6 +288,12 @@ export const api = {
   optimalXi: (season: string, version = "v1") => get<OptimalXi>("/optimal-xi", { season, version }),
   hedgeWeights: (evalSeason: string, trainSeason?: string, lo?: number, hi?: number) =>
     get<HedgeWeights>("/hedge-weights", { eval_season: evalSeason, train_season: trainSeason, lo, hi }),
+
+  // ---- live FPL feed + chips ----
+  deadline: () => get<{ gw: number | null; deadline_time: string | null }>("/live/deadline"),
+  ticker: (limit = 24) => get<{ items: TickerItem[] }>("/live/ticker", { limit }),
+  chips: (season: string, gw: number, horizon = 8) =>
+    get<{ chips: ChipSuggestion[] }>("/chips", { season, gw, horizon }),
 
   // ---- tracking + planner ----
   trackedEntries: () => get<{ entries: TrackedEntry[] }>("/track"),

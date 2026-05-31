@@ -15,15 +15,17 @@ const SECRETS = [
 export default function Settings() {
   const { data, isLoading, error } = useQuery({ queryKey: ["settings"], queryFn: api.settings });
   return (
-    <div className="fade-up" style={{ display: "grid", gap: "var(--gap)", maxWidth: 880 }}>
+    <div className="fade-up" style={{ display: "grid", gap: "var(--gap)", maxWidth: 1120 }}>
       <div>
         <h1 style={{ margin: 0, fontSize: "clamp(22px,3vw,30px)", fontWeight: 800, letterSpacing: "-0.025em" }}>Settings</h1>
         <p style={{ margin: "4px 0 0", fontSize: 13.5, color: "var(--fg-dim)" }}>Stored server-side. Secrets are write-only and never returned.</p>
       </div>
-      <AppearanceCard />
       {isLoading && <Spinner label="Loading settings…" />}
       {error && <Card><span style={{ color: "var(--bad)" }}>{String(error)}</span></Card>}
-      {data && <Form data={data} />}
+      <div className="settings-grid" style={{ display: "grid", gap: "var(--gap)", gridTemplateColumns: "repeat(2, minmax(0,1fr))", alignItems: "start" }}>
+        <AppearanceCard />
+        {data && <Form data={data} />}
+      </div>
     </div>
   );
 }

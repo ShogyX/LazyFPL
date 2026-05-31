@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { BarChart3, Clock, LayoutGrid, Moon, Settings as SettingsIcon, Sun, Zap } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { ArrowDown, ArrowUp, BarChart3, Clock, LayoutGrid, Moon, Settings as SettingsIcon, Sun, Zap } from "lucide-react";
 import { AppearanceContext, useAppearance } from "../lib/appearance";
+import { api } from "../lib/api";
 
 const NAV = [
   { to: "/planner", label: "Team Planner", icon: LayoutGrid },
@@ -71,11 +73,11 @@ function Sidebar() {
   );
 }
 
-function useCountdown() {
-  const target = useRef(Date.now() + 38 * 3600e3);
+function useCountdown(deadlineISO: string | null | undefined) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
-  let d = Math.max(0, target.current - now);
+  if (!deadlineISO) return null;
+  let d = Math.max(0, new Date(deadlineISO).getTime() - now);
   const days = Math.floor(d / 86400e3); d -= days * 86400e3;
   const h = Math.floor(d / 3600e3); d -= h * 3600e3;
   const m = Math.floor(d / 60e3); d -= m * 60e3;
@@ -84,15 +86,18 @@ function useCountdown() {
 }
 
 function Topbar({ dark, onToggle }: { dark: boolean; onToggle: () => void }) {
-  const c = useCountdown();
+  const dl = useQuery({ queryKey: ["deadline"], queryFn: api.deadline, staleTime: 60_000, retry: false });
+  const c = useCountdown(dl.data?.deadline_time);
   return (
     <header className="topbar">
       <div style={{ display: "flex", alignItems: "center", gap: 9, paddingRight: 16, borderRight: "1px solid var(--line)", whiteSpace: "nowrap" }}>
         <Clock size={15} style={{ color: "var(--fg-faint)" }} />
-        <span className="eyebrow">Next deadline</span>
-        <span className="num" style={{ fontWeight: 800, fontSize: 13, letterSpacing: "0.02em" }}>
-          {c.days}d {String(c.h).padStart(2, "0")}:{String(c.m).padStart(2, "0")}:<span style={{ color: "var(--accent)" }}>{String(c.s).padStart(2, "0")}</span>
-        </span>
+        <span className="eyebrow">{dl.data?.gw ? `GW${dl.data.gw} deadline` : "Deadline"}</span>
+        {c
+          ? <span className="num" style={{ fontWeight: 800, fontSize: 13, letterSpacing: "0.02em" }}>
+              {c.days}d {String(c.h).padStart(2, "0")}:{String(c.m).padStart(2, "0")}:<span style={{ color: "var(--accent)" }}>{String(c.s).padStart(2, "0")}</span>
+            </span>
+          : <span className="num" style={{ fontSize: 13, color: "var(--fg-faint)" }}>—</span>}
       </div>
       <Ticker />
       <button className="btn btn-ghost" onClick={onToggle} title="Toggle theme" style={{ padding: 9, borderRadius: 10 }}>
@@ -102,25 +107,38 @@ function Topbar({ dark, onToggle }: { dark: boolean; onToggle: () => void }) {
   );
 }
 
-// Static-but-representative ticker (auto-scroll, pause on hover). A live feed
-// would derive items from predictions status/news + fixtures.
-const TICKER: { kind: string; text: string; tone?: string }[] = [
-  { kind: "live", text: "LIV 2–0 BUR · 67' · Salah 1G 1A", tone: "live" },
-  { kind: "live", text: "MCI 3–1 WOL · 72' · Haaland 2G", tone: "live" },
-  { kind: "ft", text: "ARS 1–1 NEW · FT" },
-  { kind: "price", text: "▲ Semenyo £7.3 (+0.1)", tone: "up" },
-  { kind: "price", text: "▼ B.Fernandes £9.0 (−0.1)", tone: "down" },
-  { kind: "news", text: "Eze — knock, 75% GW next", tone: "warn" },
-];
+// Live ticker from the FPL feed (scores, price moves, news). Auto-scrolls;
+// pauses on hover (CSS). Falls back to empty quietly if the feed is unavailable.
 function Ticker() {
-  const items = [...TICKER, ...TICKER];
+  const { data } = useQuery({ queryKey: ["ticker"], queryFn: () => api.ticker(24), staleTime: 45_000, refetchInterval: 60_000, retry: false });
+  const items = data?.items ?? [];
+  if (!items.length) return <div style={{ flex: 1 }} />;
+  const doubled = [...items, ...items];
   return (
     <div style={{ overflow: "hidden", flex: 1, minWidth: 0, maskImage: "linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent)", WebkitMaskImage: "linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent)" }}>
       <div className="ticker-track" style={{ display: "inline-flex", animation: "tickscroll 46s linear infinite" }}>
-        {items.map((it, i) => (
+        {doubled.map((it, i) => (
           <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "0 18px", borderRight: "1px solid var(--line)", whiteSpace: "nowrap", fontSize: 12.5 }}>
-            {it.tone === "live" && <span className="livedot" />}
-            <span style={{ color: it.tone === "up" ? "var(--accent)" : it.tone === "down" ? "var(--bad)" : it.tone === "warn" ? "var(--warn)" : "var(--fg-dim)" }}>{it.text}</span>
+            {it.kind === "live" && <span className="livedot" />}
+            {(it.kind === "live" || it.kind === "ft") && (
+              <span style={{ color: "var(--fg-dim)" }}>
+                {it.kind === "ft" && <b style={{ color: "var(--fg-faint)", marginRight: 4 }}>FT</b>}
+                {it.a} <b className="num" style={{ color: "var(--fg)" }}>{it.as_}–{it.bs}</b> {it.b}
+                {it.min && <span className="num" style={{ marginLeft: 6, color: it.kind === "live" ? "var(--bad)" : "var(--fg-faint)" }}>{it.min}</span>}
+              </span>
+            )}
+            {it.kind === "price" && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: it.dir === "up" ? "var(--accent)" : "var(--bad)" }}>
+                {it.dir === "up" ? <ArrowUp size={12} /> : <ArrowDown size={12} />}
+                <b style={{ color: "var(--fg)" }}>{it.name}</b> <span className="num" style={{ color: "var(--fg-dim)" }}>{it.val}</span> <span className="num">{it.delta}</span>
+              </span>
+            )}
+            {it.kind === "news" && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--warn)" }}>
+                <span style={{ width: 7, height: 7, borderRadius: 999, background: "var(--warn)" }} />
+                <b style={{ color: "var(--fg)" }}>{it.name}</b> <span style={{ color: "var(--fg-dim)" }}>{it.note}</span>
+              </span>
+            )}
           </span>
         ))}
       </div>

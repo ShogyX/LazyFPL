@@ -113,7 +113,7 @@ function Loaded({ entryId, season, gw, version }: { entryId: number; season: str
               <>
                 <CaptainCard starters={tracked.data} preds={preds.data?.players ?? []} capId={capId} setCapId={setCapId} />
                 <TransferCard planner={planner.data} loading={planner.isLoading} error={planner.error ? String(planner.error) : null} />
-                <ChipCard rec={planner.data} />
+                <ChipCard season={season} gw={gw} />
               </>
             )}
         </div>
@@ -252,31 +252,39 @@ function Meter({ label, value, suffix = "", decimals = 0, pct }: { label: string
   );
 }
 
-// ---------- chips ----------
-const CHIPS = [
-  { key: "wildcard", name: "Wildcard" }, { key: "bboost", name: "Bench Boost" },
-  { key: "tripcap", name: "Triple Captain" }, { key: "freehit", name: "Free Hit" },
-];
-function ChipCard({ rec }: { rec?: PlannerResult }) {
-  const [sel, setSel] = useState("wildcard");
+// ---------- chips (engine-informed: TC from predictions, BB/FH from DGW/blank) ----------
+function ChipCard({ season, gw }: { season: string; gw: number }) {
+  const q = useQuery({ queryKey: ["chips", season, gw], queryFn: () => api.chips(season, gw, 8), retry: false });
+  const chips = q.data?.chips ?? [];
+  const [sel, setSel] = useState("tripcap");
+  const cur = chips.find((c) => c.key === sel) ?? chips[0];
   return (
     <Card title="Chip strategy">
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-        {CHIPS.map((c) => {
-          const on = c.key === sel;
-          return (
-            <button key={c.key} onClick={() => setSel(c.key)} className="tx" style={{ textAlign: "left", padding: "10px 11px", borderRadius: 10, cursor: "pointer", border: "1px solid " + (on ? "var(--accent)" : "var(--line)"), background: on ? "var(--accent-faint)" : "var(--surface-2)" }}>
-              <span style={{ fontWeight: 700, fontSize: 13 }}>{c.name}</span>
-            </button>
-          );
-        })}
-      </div>
-      <div style={{ display: "flex", gap: 9, alignItems: "flex-start", padding: "10px 12px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--line)" }}>
-        <Sparkles size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 1 }} />
-        <p style={{ margin: 0, fontSize: 12.5, color: "var(--fg-dim)", lineHeight: 1.5 }}>
-          Chip EV &amp; optimal timing are a backend follow-up (the planner exposes transfers + captaincy today{rec ? "" : ""}). Selecting a chip will surface its recommended gameweek once the chip-optimiser is wired to the read API.
-        </p>
-      </div>
+      {q.isLoading && <Spinner />}
+      {chips.length > 0 && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+            {chips.map((c) => {
+              const on = c.key === sel;
+              return (
+                <button key={c.key} onClick={() => setSel(c.key)} className="tx" style={{ textAlign: "left", padding: "10px 11px", borderRadius: 10, cursor: "pointer", border: "1px solid " + (on ? "var(--accent)" : "var(--line)"), background: on ? "var(--accent-faint)" : "var(--surface-2)" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>{c.name}</span>
+                    {c.best_gw != null && <span className="num" style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>GW{c.best_gw}</span>}
+                  </div>
+                  {c.ev != null && <div className="num" style={{ fontSize: 11.5, color: "var(--fg-dim)", marginTop: 3 }}>+{c.ev.toFixed(1)} EV</div>}
+                </button>
+              );
+            })}
+          </div>
+          {cur && (
+            <div style={{ display: "flex", gap: 9, alignItems: "flex-start", padding: "10px 12px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--line)" }}>
+              <Sparkles size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 1 }} />
+              <p style={{ margin: 0, fontSize: 12.5, color: "var(--fg-dim)", lineHeight: 1.5 }}>{cur.note}</p>
+            </div>
+          )}
+        </>
+      )}
     </Card>
   );
 }

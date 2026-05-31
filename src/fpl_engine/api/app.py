@@ -26,7 +26,7 @@ from ..db.models import (
     true_probabilities,
 )
 from ..optimise import SquadOptimizer, load_candidates
-from . import analytics, settings_store
+from . import analytics, live, settings_store
 
 _POS = ("GK", "DEF", "MID", "FWD")
 
@@ -409,6 +409,20 @@ def create_app() -> FastAPI:
                                hi: int = Query(38, ge=1, le=38)) -> dict:
         # Heavy on first call (replays a season of frames); memoised thereafter.
         return analytics.hedge_weights(eval_season, train_season, lo, hi)
+
+    # ---- live FPL feed (topbar + ticker) --------------------------------
+    @app.get("/live/deadline")
+    def live_deadline() -> dict:
+        return live.deadline()
+
+    @app.get("/live/ticker")
+    def live_ticker(limit: int = Query(24, ge=1, le=60)) -> dict:
+        return live.ticker(limit)
+
+    # ---- engine-informed chip suggestions -------------------------------
+    @app.get("/chips")
+    def chips(season: str, gw: int, horizon: int = Query(8, ge=1, le=20)) -> dict:
+        return live.chips(season, gw, horizon)
 
     return app
 

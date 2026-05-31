@@ -174,7 +174,7 @@ a { color: inherit; text-decoration: none; }
 .navitem.active { background: var(--surface-2); color: var(--fg); border-color: var(--line); }
 .navitem.active svg { color: var(--accent); }
 
-@media (max-width: 1080px) { .planner-grid, .cmp-grid { grid-template-columns: minmax(0,1fr) !important; } }
+@media (max-width: 1080px) { .planner-grid, .cmp-grid, .settings-grid { grid-template-columns: minmax(0,1fr) !important; } }
 @media (max-width: 880px) {
   .shell { grid-template-columns: 1fr; }
   .sidebar { position: static; height: auto; flex-direction: row; align-items: center; flex-wrap: wrap; }

@@ -233,3 +233,12 @@ def test_optimal_xi_history(client):
     assert g["gw"] == GW
     assert g["predicted_xi_xp"] > 0 and g["actual_points"] > 0
     assert g["captain"] is not None
+
+
+def test_chips_triple_captain_from_predictions(client):
+    r = client.get(f"/chips?season={SEASON}&gw={GW}&horizon=8").json()
+    chips = {c["key"]: c for c in r["chips"]}
+    assert set(chips) == {"tripcap", "bboost", "freehit", "wildcard"}
+    # Triple Captain is computed from stored predictions for the GW.
+    assert chips["tripcap"]["best_gw"] == GW
+    assert chips["tripcap"]["ev"] is not None and chips["tripcap"]["ev"] > 0
