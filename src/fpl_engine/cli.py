@@ -507,6 +507,15 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         ("freeze model", [fpl_bin, "freeze", "--study-version", args.study_version,
                           "--version", args.version]),
         ("predict current GW", [fpl_bin, "refresh", "--version", args.version]),
+        # Without these two a fresh install only has the upcoming GW predicted and
+        # no backtest, so the predicted-vs-actual / optimal-XI / compare views are
+        # empty. Backfill the whole eval season's serving xP and run a backtest so
+        # the model-performance pages have data out of the box.
+        ("serving backfill", [fpl_bin, "backfill-serving", "--season", seasons[-1],
+                              "--version", args.version]),
+        ("baseline backtest", [fpl_bin, "backtest", "--season", seasons[-1],
+                               "--from-gw", "1", "--to-gw", "38", "--engine",
+                               "--predictors", "model:v1", "ppg_career", "form"]),
     ]
     total = len(stages)
     print(f"bootstrap: {len(seasons)} seasons ({seasons[0]}..{seasons[-1]}), "
@@ -547,6 +556,35 @@ def cmd_predict(args: argparse.Namespace) -> int:
         res = prediction_server(version=args.version).predict_gw(args.season, args.gw)
     print(json.dumps(res.__dict__, indent=2, default=str))
     return 0
+
+
+def cmd_backfill_serving(args: argparse.Namespace) -> int:
+    """Serve xP for EVERY GW of a season that has a feature panel — not just the
+    upcoming one. A fresh install otherwise only predicts the current GW, leaving
+    the predicted-vs-actual and optimal-XI analytics empty; this fills the whole
+    season so those views (and per-GW accuracy) have data. Idempotent upsert."""
+    from sqlalchemy import select as _select
+    from .db.engine import get_sessionmaker
+    from .db.models import training_rows
+    tr = training_rows.c
+    with get_sessionmaker()() as s:
+        gws = sorted({int(r[0]) for r in s.execute(
+            _select(tr.gw).distinct().where(tr.season == args.season)).all()})
+    if not gws:
+        print(json.dumps({"season": args.season, "error": "no feature panel"}))
+        return 1
+    server = prediction_server(version=args.version)
+    done = 0
+    for gw in gws:
+        try:
+            server.predict_gw(args.season, gw)
+            done += 1
+        except Exception as exc:  # noqa: BLE001 — one bad GW shouldn't abort the rest
+            log.warning("backfill predict failed",
+                        extra={"season": args.season, "gw": gw, "error": str(exc)})
+    print(json.dumps({"season": args.season, "version": args.version,
+                      "gws_total": len(gws), "gws_predicted": done}))
+    return 0 if done else 1
 
 
 def cmd_refresh(args: argparse.Namespace) -> int:
@@ -994,6 +1032,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--component", action="store_true",
                     help="use the §C.1 bottom-up component predictor (minutes-gated)")
     pr.set_defaults(fn=cmd_predict)
+
+    bf = sub.add_parser("backfill-serving",
+                        help="serve xP for every GW of a season with a panel (populates analytics)")
+    bf.add_argument("--season", required=True)
+    bf.add_argument("--version", default="v1")
+    bf.set_defaults(fn=cmd_backfill_serving)
 
     rf = sub.add_parser("refresh", help="run the full current-GW pipeline once (ingest->facts->targets->panel->predict for the next N GWs)")
     rf.add_argument("--version", default="v1")
