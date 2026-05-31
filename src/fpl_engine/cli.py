@@ -517,6 +517,18 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
                                "--from-gw", "1", "--to-gw", "38", "--engine",
                                "--predictors", "model:v1", "ppg_career", "form"]),
     ]
+    # Honest, leakage-safe backtests for the recent PAST seasons so the operator
+    # can browse historical model performance in the Compare view. The frozen
+    # model trained on these seasons, so it (and the engine, which uses it) would
+    # be in-sample here — we drop it (--no-model) and use causal baselines plus
+    # ensembles trained on the PRIOR season when that season is in the window.
+    for s in seasons[:-1][-2:]:
+        cmd = [fpl_bin, "backtest", "--season", s, "--from-gw", "1", "--to-gw", "38", "--no-model"]
+        idx = list(ALL_SEASONS).index(s) if s in ALL_SEASONS else 0
+        prior = ALL_SEASONS[idx - 1] if idx > 0 else None
+        if prior and prior in seasons:   # only train on a season we actually built
+            cmd += ["--with-ensembles", "--train-season", prior]
+        stages.append((f"backtest {s} (leakage-safe)", cmd))
     total = len(stages)
     print(f"bootstrap: {len(seasons)} seasons ({seasons[0]}..{seasons[-1]}), "
           f"{total} stages, memory-bounded (one process per stage)\n", flush=True)

@@ -42,7 +42,7 @@ export default function ModelPerformance() {
       </div>
       {all.isLoading && <Spinner />}
       {all.error && <ErrorBox message={String(all.error)} />}
-      {all.data && tab === "compare" && <Compare runs={all.data.runs} season={effSeason} />}
+      {all.data && tab === "compare" && <Compare runs={all.data.runs} season={effSeason} latestSeason={seasons[0] ?? ""} />}
       {tab === "accuracy" && <AccuracyTab season={effSeason} version={version} />}
       {tab === "optimal" && <OptimalTab season={effSeason} version={version} />}
       {tab === "weights" && <WeightsTab season={effSeason} />}
@@ -52,7 +52,7 @@ export default function ModelPerformance() {
 }
 
 // ---------------- Compare ----------------
-function Compare({ runs, season }: { runs: CompareRun[]; season: string }) {
+function Compare({ runs, season, latestSeason }: { runs: CompareRun[]; season: string; latestSeason: string }) {
   const seasonRuns = useMemo(() => {
     const seen = new Set<string>(); const out: (CompareRun & { idx: number })[] = [];
     runs.filter((r) => r.season === season).forEach((r) => { if (!seen.has(r.strategy)) { seen.add(r.strategy); out.push({ ...r, idx: out.length }); } });
@@ -105,7 +105,7 @@ function Compare({ runs, season }: { runs: CompareRun[]; season: string }) {
             {label(r.strategy)}
           </Chip>
         ))}
-        <div style={{ marginLeft: "auto" }}><EngineRunButton season={season} /></div>
+        {season === latestSeason && <div style={{ marginLeft: "auto" }}><EngineRunButton season={season} /></div>}
       </div>
       <div className="cmp-grid" style={{ display: "grid", gap: "var(--gap)", gridTemplateColumns: "minmax(0,1.1fr) minmax(300px,0.9fr)", alignItems: "start" }}>
         <Card title={metric === "cumulative" ? "Cumulative points" : metric === "weekly" ? "Points per gameweek" : "Season totals"}
