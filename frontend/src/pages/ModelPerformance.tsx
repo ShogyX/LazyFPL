@@ -56,7 +56,9 @@ function Compare({ runs, season }: { runs: CompareRun[]; season: string }) {
   const seasonRuns = useMemo(() => {
     const seen = new Set<string>(); const out: (CompareRun & { idx: number })[] = [];
     runs.filter((r) => r.season === season).forEach((r) => { if (!seen.has(r.strategy)) { seen.add(r.strategy); out.push({ ...r, idx: out.length }); } });
-    return out.sort((a, b) => b.total_points - a.total_points).map((r, i) => ({ ...r, idx: i }));
+    // "engine" (follow the engine completely) is the headline; pin it first.
+    const rank = (r: CompareRun) => (r.strategy === "engine" ? Infinity : r.total_points);
+    return out.sort((a, b) => rank(b) - rank(a)).map((r, i) => ({ ...r, idx: i }));
   }, [runs, season]);
 
   const [picked, setPicked] = useState<string[] | null>(null);
@@ -69,6 +71,7 @@ function Compare({ runs, season }: { runs: CompareRun[]; season: string }) {
 
   const sel = seasonRuns.filter((r) => eff.includes(r.strategy));
   const color = (r: { idx: number }) => SERIES[r.idx % 6];
+  const label = (s: string) => (s === "engine" ? "Full engine" : s);
 
   const chartData = useMemo(() => {
     const rows: Record<string, number>[] = [];
@@ -99,7 +102,7 @@ function Compare({ runs, season }: { runs: CompareRun[]; season: string }) {
         {seasonRuns.map((r) => (
           <Chip key={r.strategy} on={eff.includes(r.strategy)} color={color(r)}
             onClick={() => setPicked(eff.includes(r.strategy) ? eff.filter((k) => k !== r.strategy) : [...eff, r.strategy])}>
-            {r.strategy}
+            {label(r.strategy)}
           </Chip>
         ))}
       </div>
@@ -107,7 +110,7 @@ function Compare({ runs, season }: { runs: CompareRun[]; season: string }) {
         <Card title={metric === "cumulative" ? "Cumulative points" : metric === "weekly" ? "Points per gameweek" : "Season totals"}
           right={<Segmented size="sm" value={metric} onChange={setMetric} options={[{ value: "cumulative", label: "Cumulative" }, { value: "weekly", label: "Weekly" }, { value: "totals", label: "Totals" }]} />}>
           {metric === "totals"
-            ? <BarChart height={320} horizontalLabels data={sel.map((r) => ({ name: r.strategy, total: r.total_points, net: r.net_points }))} xKey="name"
+            ? <BarChart height={320} horizontalLabels data={sel.map((r) => ({ name: label(r.strategy), total: r.total_points, net: r.net_points }))} xKey="name"
                 series={[{ key: "total", label: "Total", color: "var(--s1)" }, { key: "net", label: "Net (after hits)", color: "var(--s0)" }]} xFormat={(v) => String(v)} />
             : <>
                 <LineChart height={320} data={chartData} xKey="gw" xFormat={(v) => "GW" + v} series={series} legend={false} />
@@ -129,7 +132,7 @@ function Compare({ runs, season }: { runs: CompareRun[]; season: string }) {
                   <span className="num" style={{ fontWeight: 800, color: i === 0 ? "var(--accent)" : "var(--fg-faint)", fontSize: 13 }}>{i + 1}</span>
                   <span style={{ width: 11, height: 11, borderRadius: 3, background: color(r) }} />
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 700, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.strategy}</div>
+                    <div style={{ fontWeight: 700, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label(r.strategy)}</div>
                     <div style={{ display: "flex", gap: 10, fontSize: 11, color: "var(--fg-faint)", marginTop: 2 }}><span className="num">net {r.net_points}</span><span className="num">{r.total_hits} hits</span></div>
                   </div>
                   <div style={{ textAlign: "right" }}>

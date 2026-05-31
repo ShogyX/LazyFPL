@@ -300,3 +300,25 @@ def test_free_hit_chip_measured_and_added(sm):
     assert all("fh_uplift" in g for g in res.per_gw if "skipped" not in g)
     assert "free_hit" in res.chips
     assert res.net_with_chips >= res.net_points        # chips never reduce the total
+
+
+def test_engine_policy_follows_transfers_and_commits_chips_live(sm):
+    _seed(sm)
+    res = Backtester(sm=sm).run(SEASON, GWS, FeaturePredictor("skill", "skill"),
+                                policy="engine")
+    assert res.strategy == "engine"
+    # chips are committed live and folded into the GW rows, so the persisted
+    # total already reflects them (no separate net_with_chips top-up).
+    assert res.total_points == sum(g["points"] for g in res.per_gw)
+    assert res.net_with_chips == res.net_points
+    # any committed chip lands on exactly one GW and tags that row.
+    for chip, info in res.chips.items():
+        tagged = [g for g in res.per_gw if chip in g.get("chips", [])]
+        assert len(tagged) == 1 and tagged[0]["gw"] == info["gw"]
+    # one chip per GW at most (collision-free schedule).
+    gws_used = [info["gw"] for info in res.chips.values()]
+    assert len(gws_used) == len(set(gws_used))
+    with sm() as s:
+        row = s.execute(select(backtest_runs).where(
+            backtest_runs.c.strategy == "engine")).one()
+    assert row.total_points == res.total_points

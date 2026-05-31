@@ -788,8 +788,15 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         if not preds:
             print(json.dumps({"error": "no matching predictors"}))
             return 2
-    results = Backtester(model_version=args.version, ft_value=args.ft_value,
-                         free_hit=args.free_hit).compare(args.season, gws, preds)
+    bt = Backtester(model_version=args.version, ft_value=args.ft_value,
+                    free_hit=args.free_hit)
+    results = bt.compare(args.season, gws, preds)
+    if args.engine:
+        # "Follow the engine completely": value-aware transfers + live chip
+        # commitment, driven by the served model (falls back to any predictor).
+        engine_pred = (preds.get("model:v1") or preds.get(f"model:{args.version}")
+                       or preds.get("hedge") or next(iter(preds.values())))
+        results["engine"] = bt.run(args.season, gws, engine_pred, policy="engine")
     ranking = sorted(results.values(), key=lambda r: r.net_with_chips, reverse=True)
     print(json.dumps({
         "season": args.season, "gws": f"{args.from_gw}-{args.to_gw}",
@@ -1048,6 +1055,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="drop the frozen model:v1 (leakage-free read on its train seasons)")
     bt.add_argument("--free-hit", action="store_true",
                     help="measure + add the Free Hit chip (one-week optimal squad)")
+    bt.add_argument("--engine", action="store_true",
+                    help="add a 'follow the engine completely' run: value-aware "
+                         "transfers + live chip commitment (TC/BB/FH)")
     bt.add_argument("--train-season", help="season to train ensemble weights on")
     bt.set_defaults(fn=cmd_backtest)
 

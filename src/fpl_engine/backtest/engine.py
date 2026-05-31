@@ -124,7 +124,7 @@ class BacktestResult:
 
 class Backtester:
     def __init__(self, sm: sessionmaker[Session] | None = None, model_version: str = "v1",
-                 ft_value: float = 0.0, free_hit: bool = False):
+                 ft_value: float = 0.0, free_hit: bool = False, chip_horizon: int = 8):
         self._sm = sm or get_sessionmaker()
         self.model_version = model_version
         # Opportunity cost of using a free transfer (transfer-planning discipline):
@@ -133,6 +133,9 @@ class Backtester:
         # Free Hit chip: when enabled, measure (per GW) the gain from fielding a
         # fully-optimal one-week squad vs the current squad, and add the best one.
         self.free_hit = free_hit
+        # Lookahead window (GWs) the live "engine" policy sees when deciding
+        # whether to commit a chip this week — mirrors the served ChipPlanner.
+        self.chip_horizon = chip_horizon
 
     # -- causal panel + actuals --
     def _frames(self, season: str, gws: list[int]) -> dict[int, dict[int, _Frame]]:
@@ -333,7 +336,7 @@ class Backtester:
                    "squad_value": sv + bank, "bank": bank,
                    "cap_xp": round(cap_xp, 3), "tc_uplift": tc_uplift,
                    "bench_xp": round(bench_xp, 3), "bb_uplift": bb_uplift}
-            if self.free_hit:
+            if self.free_hit or policy == "engine":
                 # one-week fully-optimal squad within the real team value (free).
                 fh = self._free_hit_value(pool, actual, pos_by, xp_by,
                                           team_value=sv + bank,
@@ -349,12 +352,29 @@ class Backtester:
                 predictor.observe([(eid, fr.features, fr.pos) for eid, fr in frame.items()],
                                   {eid: fr.actual for eid, fr in frame.items()})
 
-        strategy = predictor.name if policy == "active" else f"hold:{predictor.name}"
-        chip_bonus, chips = self._chip_bonuses(per_gw)
+        if policy == "engine":
+            # "Follow the engine completely": commit chips live (week-to-week,
+            # one of each) and fold their realised uplift into the GW they were
+            # played — so the persisted total IS the points a manager who follows
+            # the engine's transfer + chip advice would have scored.
+            chip_bonus, chips = self._chip_bonuses_live(per_gw, self.chip_horizon)
+            by_gw = {row["gw"]: row for row in per_gw if "gw" in row}
+            for chip, info in chips.items():
+                row = by_gw.get(info["gw"])
+                if row is not None:
+                    row["points"] = row.get("points", 0) + info["uplift"]
+                    row.setdefault("chips", []).append(chip)
+            gross += chip_bonus  # chip uplift now lives in gross + the GW rows
+            strategy = "engine"
+            net_with_chips = gross - hits
+        else:
+            chip_bonus, chips = self._chip_bonuses(per_gw)
+            strategy = predictor.name if policy == "active" else f"hold:{predictor.name}"
+            net_with_chips = gross - hits + chip_bonus
         result = BacktestResult(
             season=season, strategy=strategy, start_gw=gws[0], end_gw=gws[-1],
             total_points=gross, total_hits=hits, net_points=gross - hits, per_gw=per_gw,
-            chip_bonus=chip_bonus, net_with_chips=gross - hits + chip_bonus, chips=chips)
+            chip_bonus=chip_bonus, net_with_chips=net_with_chips, chips=chips)
         self._store(result)
         log.info("backtest done", extra={"season": season, "strategy": strategy,
                                          "net_points": result.net_points, "hits": hits})
@@ -395,6 +415,43 @@ class Backtester:
             fh_pts = int(fh.get("fh_uplift", 0))
             chips["free_hit"] = {"gw": fh["gw"], "uplift": fh_pts}
             total += fh_pts
+        return total, chips
+
+    def _chip_bonuses_live(self, per_gw: list[dict], horizon: int) -> tuple[int, dict]:
+        """Live (forward) chip schedule: walk the season in order and play each
+        chip at the first GW whose xP-timing signal LEADS the next ``horizon`` GWs
+        — the same call ChipPlanner makes week-to-week, without the post-hoc
+        global argmax of :meth:`_chip_bonuses`. One chip per season, never two on
+        the same GW. Wildcard is omitted: continuous value-aware transfers already
+        stand in for its squad-reset benefit."""
+        played = [g for g in per_gw if "skipped" not in g]
+        if not played:
+            return 0, {}
+        sig = {"triple_captain": lambda g: g.get("cap_xp", 0.0),
+               "bench_boost": lambda g: g.get("bench_xp", 0.0),
+               "free_hit": lambda g: g.get("fh_xp_gap") if "fh_xp_gap" in g else None}
+        uplift = {"triple_captain": lambda g: int(g.get("tc_uplift", 0)),
+                  "bench_boost": lambda g: int(g.get("bb_uplift", 0)),
+                  "free_hit": lambda g: int(g.get("fh_uplift", 0))}
+        remaining = {c for c, f in sig.items() if any(f(g) is not None for g in played)}
+        chips: dict = {}
+        total = 0
+        for i, g in enumerate(played):
+            if not remaining:
+                break
+            window = played[i:i + horizon]
+            best: str | None = None
+            for c in remaining:
+                now = sig[c](g)
+                if now is None or now <= 0:
+                    continue
+                ahead = [v for v in (sig[c](w) for w in window) if v is not None]
+                if ahead and now >= max(ahead) and (best is None or now > (sig[best](g) or 0)):
+                    best = c
+            if best is not None:
+                chips[best] = {"gw": g["gw"], "uplift": uplift[best](g)}
+                total += uplift[best](g)
+                remaining.discard(best)
         return total, chips
 
     def compare(self, season: str, gws: list[int],
