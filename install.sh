@@ -121,6 +121,18 @@ PY
 )
 EOF
 
+# Run a command AS the postgres OS user. As root there is no sudo, so use su;
+# otherwise use sudo -u. ($SUDO -u postgres is wrong as root — "-u" is not a
+# command — which previously left the role/db uncreated and the app unable to
+# authenticate.)
+if [ "$(id -u)" -eq 0 ]; then
+  pg_run() { su -s /bin/sh postgres -c "$*"; }
+elif [ -n "$SUDO" ]; then
+  pg_run() { $SUDO -u postgres sh -c "$*"; }
+else
+  pg_run() { sh -c "$*"; }   # last resort: current user is the db superuser
+fi
+
 if [ "$PROVISION" -eq 1 ] && { [ "$DB_HOST" = "localhost" ] || [ "$DB_HOST" = "127.0.0.1" ]; }; then
   info "Ensuring PostgreSQL is installed and running"
   command -v psql >/dev/null 2>&1 || apt_install postgresql postgresql-contrib || warn "postgresql install failed"
@@ -132,25 +144,19 @@ if [ "$PROVISION" -eq 1 ] && { [ "$DB_HOST" = "localhost" ] || [ "$DB_HOST" = "1
     || warn "could not start postgresql automatically"
 
   if command -v psql >/dev/null 2>&1; then
-    psql_su() { $SUDO -u postgres psql -tAc "$1" 2>/dev/null; }
+    has() { [ "$(pg_run "psql -tAc \"$1\" 2>/dev/null")" = "1" ]; }
     info "Ensuring role '$DB_USER' and databases '$DB_NAME' / '${DB_NAME}_test'"
-    if [ "$(psql_su "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'")" != "1" ]; then
-      $SUDO -u postgres psql -c "CREATE ROLE \"${DB_USER}\" LOGIN PASSWORD '${DB_PASS}';" >/dev/null 2>&1 \
-        || warn "could not create role ${DB_USER}"
-    fi
+    has "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" \
+      || pg_run "psql -c \"CREATE ROLE \\\"${DB_USER}\\\" LOGIN PASSWORD '${DB_PASS}';\"" >/dev/null 2>&1 \
+      || warn "could not create role ${DB_USER}"
     # Always (re)set the password + LOGIN so it matches FPL_DATABASE_URL even if
-    # the role already existed from a prior run with a different/empty password
-    # (the apt PostgreSQL cluster persists between installs).
-    $SUDO -u postgres psql -c "ALTER ROLE \"${DB_USER}\" WITH LOGIN PASSWORD '${DB_PASS}';" >/dev/null 2>&1 \
+    # the role already existed from a prior run (the apt cluster persists).
+    pg_run "psql -c \"ALTER ROLE \\\"${DB_USER}\\\" WITH LOGIN PASSWORD '${DB_PASS}';\"" >/dev/null 2>&1 \
       || warn "could not set password for role ${DB_USER}"
     for db in "$DB_NAME" "${DB_NAME}_test"; do
-      if [ "$(psql_su "SELECT 1 FROM pg_database WHERE datname='${db}'")" != "1" ]; then
-        # Force UTF8 via template0 — FPL data has non-ASCII names; a SQL_ASCII
-        # database (the default on C/POSIX-locale boxes) would reject them.
-        $SUDO -u postgres createdb -O "$DB_USER" -E UTF8 -T template0 \
-              --lc-collate=C --lc-ctype=C "$db" >/dev/null 2>&1 \
-          || warn "could not create db ${db}"
-      fi
+      has "SELECT 1 FROM pg_database WHERE datname='${db}'" \
+        || pg_run "createdb -O '${DB_USER}' -E UTF8 -T template0 --lc-collate=C --lc-ctype=C '${db}'" >/dev/null 2>&1 \
+        || warn "could not create db ${db}"
     done
   fi
 fi
