@@ -106,6 +106,7 @@ export interface PlayerHistoryRow {
 export interface GeneralSettings {
   entry_id: number | null;
   season: string | null;
+  gw: number | null;
   horizon: number;
   theme: "light" | "dark";
   active_model: string;

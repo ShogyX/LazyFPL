@@ -17,6 +17,7 @@ export default function TeamPlanner() {
     if (!g) return;
     if (g.entry_id != null && entry === "") setEntry(String(g.entry_id));
     if (g.season && season === "") setSeason(g.season);
+    if (g.gw != null) setGw(g.gw);
   }, [settings.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const entryId = entry === "" ? null : Number(entry);
@@ -38,7 +39,7 @@ function Controls(props: { entry: string; season: string; gw: number; onEntry: (
     <Card>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
         <Mini label="Entry id"><div style={{ width: 120 }}><TextInput inputMode="numeric" value={props.entry} onChange={(e) => props.onEntry(e.target.value)} /></div></Mini>
-        <Mini label="Season"><div style={{ width: 110 }}><TextInput placeholder="2024-25" value={props.season} onChange={(e) => props.onSeason(e.target.value)} /></div></Mini>
+        <Mini label="Season"><div style={{ width: 110 }}><TextInput placeholder="2025-26" value={props.season} onChange={(e) => props.onSeason(e.target.value)} /></div></Mini>
         <Mini label="GW"><div style={{ width: 72 }}><TextInput type="number" min={1} max={38} value={props.gw} onChange={(e) => props.onGw(Number(e.target.value))} /></div></Mini>
         <Button variant="pri" loading={track.isPending} icon={track.isSuccess ? <Check size={15} /> : <Download size={15} />}
           disabled={props.entry === ""} onClick={() => track.mutate(Number(props.entry))}>

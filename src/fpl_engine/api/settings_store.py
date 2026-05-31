@@ -18,13 +18,14 @@ from sqlalchemy.dialects.postgresql import insert
 
 from ..config import get_settings
 from ..db.engine import get_sessionmaker
-from ..db.models import app_settings
+from ..db.models import app_settings, predictions_player_gw
 
 # Non-secret config keys the UI can edit, with safe defaults. Anything not here
 # is rejected by the writer so the table can't be used as an arbitrary KV dump.
 GENERAL_DEFAULTS: dict[str, Any] = {
     "entry_id": None,
     "season": None,
+    "gw": None,
     "horizon": 6,
     "theme": "light",          # light | dark
     "active_model": "v1",      # serving model_version used for /predictions etc.
@@ -74,8 +75,26 @@ def read_general() -> dict[str, Any]:
             select(app_settings.c.key, app_settings.c.value)
             .where(app_settings.c.is_secret.is_(False))
         ).all()
-    for r in rows:
-        out[r.key] = r.value
+        for r in rows:
+            out[r.key] = r.value
+        # Out of the box the season is unset; default it to the latest season we
+        # actually serve predictions for, so a fresh install lands on data instead
+        # of an empty page. A user's stored choice still takes precedence.
+        if not out.get("season"):
+            latest = s.execute(
+                select(func.max(predictions_player_gw.c.season))
+            ).scalar_one_or_none()
+            if latest:
+                out["season"] = latest
+        # Likewise default the GW to the newest one with predictions for that
+        # season, so the planner/predictions views open on populated data.
+        if not out.get("gw") and out.get("season"):
+            gw = s.execute(
+                select(func.max(predictions_player_gw.c.gw))
+                .where(predictions_player_gw.c.season == out["season"])
+            ).scalar_one_or_none()
+            if gw:
+                out["gw"] = int(gw)
     return out
 
 
