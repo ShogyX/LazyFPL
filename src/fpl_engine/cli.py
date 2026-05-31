@@ -500,6 +500,10 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         ("acquire history", [fpl_bin, "history", "acquire", *sf]),
         ("resolve identities", [fpl_bin, "resolve", *sf]),
         ("build facts", [fpl_bin, "facts", *sf]),
+        # vaastav's CSVs lag for the in-progress season; pull the finished GWs it
+        # is missing from the official FPL API so the run-in isn't absent from
+        # facts -> targets -> panel -> predictions/backtests below.
+        ("backfill results (FPL API)", [fpl_bin, "backfill-results", "--season", seasons[-1]]),
         ("defensive contribution", [fpl_bin, "dc", *sf]),
         ("build targets", [fpl_bin, "targets", *sf]),
         ("feature panel", [fpl_bin, "features", "panel", *sf]),
@@ -597,6 +601,51 @@ def cmd_backfill_serving(args: argparse.Namespace) -> int:
     print(json.dumps({"season": args.season, "version": args.version,
                       "gws_total": len(gws), "gws_predicted": done}))
     return 0 if done else 1
+
+
+def cmd_backfill_results(args: argparse.Namespace) -> int:
+    """Backfill player_match_stats for finished GWs the vaastav community CSVs
+    still lack (the in-progress / just-finished season lags upstream), using the
+    official FPL API. With --rebuild it also refreshes that season's DC / targets
+    / feature panel so the analytics + backtests include the run-in."""
+    from sqlalchemy import func
+    from sqlalchemy import select as _select
+
+    from .db.engine import get_sessionmaker
+    from .db.models import player_match_stats as pms
+    from .ingest.fpl import FplIngestor
+
+    fetch = FetchClient()
+    try:
+        season = args.season or _current_season(fetch)
+        # Refresh players so price/position map correctly for the new GWs.
+        try:
+            FplIngestor(fetch).ingest_bootstrap()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("backfill: bootstrap refresh failed", extra={"error": str(exc)})
+        boot = fetch.get("fpl", "/bootstrap-static/", cache_ttl=0).payload
+        events = boot.get("events", []) if isinstance(boot, dict) else []
+        finished = sorted(int(e["id"]) for e in events
+                          if e.get("finished") and e.get("data_checked") and e.get("id"))
+        with get_sessionmaker()() as s:
+            present = {int(r[0]) for r in s.execute(
+                _select(pms.c.gw).distinct().where(pms.c.season == season)).all()}
+        missing = [g for g in finished if g not in present]
+        if not missing:
+            print(json.dumps({"season": season, "backfilled_gws": [], "note": "already complete"}))
+            return 0
+        FactBuilder(VaastavIngestor(fetch)).build_player_match_stats_fpl(season, missing, fetch)
+        if args.rebuild:
+            DcReconstructor().build(seasons=[season])
+            TargetBuilder().build(seasons=[season])
+            PanelBuilder().build(seasons=[season])
+        with get_sessionmaker()() as s:
+            mx = s.execute(_select(func.max(pms.c.gw)).where(pms.c.season == season)).scalar_one_or_none()
+    finally:
+        fetch.close()
+    print(json.dumps({"season": season, "backfilled_gws": missing,
+                      "max_gw_now": mx, "rebuilt": bool(args.rebuild)}))
+    return 0
 
 
 def cmd_refresh(args: argparse.Namespace) -> int:
@@ -1050,6 +1099,13 @@ def build_parser() -> argparse.ArgumentParser:
     bf.add_argument("--season", required=True)
     bf.add_argument("--version", default="v1")
     bf.set_defaults(fn=cmd_backfill_serving)
+
+    br = sub.add_parser("backfill-results",
+                        help="backfill finished GWs missing from vaastav, from the official FPL API")
+    br.add_argument("--season", help="season to repair (default: current)")
+    br.add_argument("--rebuild", action="store_true",
+                    help="also rebuild that season's DC / targets / feature panel")
+    br.set_defaults(fn=cmd_backfill_results)
 
     rf = sub.add_parser("refresh", help="run the full current-GW pipeline once (ingest->facts->targets->panel->predict for the next N GWs)")
     rf.add_argument("--version", default="v1")

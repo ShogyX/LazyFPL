@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..db.engine import get_sessionmaker
-from ..db.models import id_crosswalk, player_match_stats, team_match_stats
+from ..db.models import id_crosswalk, player_match_stats, players, team_match_stats
 from ..ingest.vaastav import VaastavIngestor
 from ..logging_setup import get_logger
 
@@ -176,6 +176,79 @@ class FactBuilder:
             log.info("player_match_stats built", extra={"season": season,
                                                          "rows": len(unique), "skipped": skipped,
                                                          "duplicates": dupes})
+        return results
+
+    def build_player_match_stats_fpl(self, season: str, gws: Iterable[int],
+                                     fetch) -> list[BuildResult]:
+        """Backfill player_match_stats from the official FPL API
+        (``/event/{gw}/live/``) for gameweeks the vaastav community CSVs don't yet
+        cover (the in-progress / just-finished season lags upstream). Same table
+        and PK (season, element_id, fixture_id) as the vaastav path, so the rows
+        coexist and a re-run upserts. Opponent / home / kickoff come from the
+        already-ingested fixtures (team_match_stats); price + position from the
+        players snapshot. (GW30-38 have no doubles, so one fixture per player.)"""
+        results: list[BuildResult] = []
+        with self._sm() as s:
+            key_map = self._fpl_key_map(s, season)
+            pl = players.c
+            players_map = {
+                int(r.id): (r.team_id, r.element_type, r.now_cost)
+                for r in s.execute(select(pl.id, pl.team_id, pl.element_type, pl.now_cost)).all()
+            }
+            tm = team_match_stats.c
+            fixtures_map = {
+                (int(r.fixture_id), int(r.team_id)): (r.opponent_team_id, r.was_home, r.gw, r.kickoff_time)
+                for r in s.execute(
+                    select(tm.fixture_id, tm.team_id, tm.opponent_team_id, tm.was_home,
+                           tm.gw, tm.kickoff_time).where(tm.season == season)).all()
+            }
+            for gw in gws:
+                payload = fetch.get("fpl", f"/event/{gw}/live/", season=season).payload
+                elements = payload.get("elements", []) if isinstance(payload, dict) else []
+                rows: list[dict] = []
+                for e in elements:
+                    eid = _int(e.get("id"))
+                    stats = e.get("stats") or {}
+                    explain = e.get("explain") or []
+                    if eid is None or not explain:
+                        continue
+                    pinfo = players_map.get(eid)
+                    team_id = pinfo[0] if pinfo else None
+                    for ex in explain:
+                        fid = _int(ex.get("fixture"))
+                        if fid is None:
+                            continue
+                        fm = fixtures_map.get((fid, team_id)) if team_id is not None else None
+                        opp, home, gnum, kickoff = fm if fm else (None, None, gw, None)
+                        rec = {
+                            "season": season, "element_id": eid, "fixture_id": fid,
+                            "player_key": key_map.get(str(eid)),
+                            "gw": gnum or gw, "team_id": team_id,
+                            "opponent_team_id": _int(opp), "was_home": home,
+                            "total_points": _int(stats.get("total_points")),
+                            "value": _int(pinfo[2]) if pinfo else None,
+                            "selected": None, "transfers_balance": None,
+                            "kickoff_time": kickoff,
+                            "element_type": _int(pinfo[1]) if pinfo else None,
+                            "tackles": _int(stats.get("tackles")),
+                            "clearances_blocks_interceptions":
+                                _int(stats.get("clearances_blocks_interceptions")),
+                            "recoveries": _int(stats.get("recoveries")),
+                            "defensive_contribution": _int(stats.get("defensive_contribution")),
+                            "raw": {"source": "fpl_live", **{k: stats.get(k) for k in stats}},
+                        }
+                        for c in _PMS_COLS:
+                            rec[c] = _int(stats.get(c))
+                        for c in _PMS_FLOATS:
+                            rec[c] = _float(stats.get(c))
+                        rows.append(rec)
+                unique, dupes = _dedupe(rows, ("season", "element_id", "fixture_id"))
+                _chunked_upsert(s, player_match_stats, unique,
+                                ["season", "element_id", "fixture_id"])
+                s.commit()
+                results.append(BuildResult(season, len(elements), len(unique), 0, dupes))
+                log.info("player_match_stats backfilled from fpl",
+                         extra={"season": season, "gw": gw, "rows": len(unique)})
         return results
 
     def build_team_match_stats(self, seasons: Iterable[str] | None = None) -> list[BuildResult]:
