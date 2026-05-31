@@ -115,6 +115,37 @@ def test_backtests_endpoint(client):
     assert r["backtests"][0]["net_points"] == 492
 
 
+def test_backtest_run_validates_range(client):
+    assert client.post(f"/backtests/run?season={SEASON}&from_gw=10&to_gw=5").status_code == 422
+
+
+def test_backtest_run_starts_and_clears_guard(client, monkeypatch):
+    import fpl_engine.api.app as appmod
+    seen = []
+
+    def fake(season, version, from_gw, to_gw):  # don't replay a real season in a test
+        seen.append((season, version, from_gw, to_gw))
+        with appmod._BT_LOCK:
+            appmod._BT_RUNNING.discard(season)
+
+    monkeypatch.setattr(appmod, "_run_engine_backtest", fake)
+    r = client.post(f"/backtests/run?season={SEASON}")
+    assert r.status_code == 200 and r.json()["strategy"] == "engine"
+    assert seen == [(SEASON, "v1", 1, 38)]  # TestClient runs the background task
+    assert client.get("/backtests/running").json()["running"] == []
+
+
+def test_backtest_run_conflicts_when_already_running(client):
+    import fpl_engine.api.app as appmod
+    with appmod._BT_LOCK:
+        appmod._BT_RUNNING.add(SEASON)
+    try:
+        assert client.post(f"/backtests/run?season={SEASON}").status_code == 409
+    finally:
+        with appmod._BT_LOCK:
+            appmod._BT_RUNNING.discard(SEASON)
+
+
 def test_odds_consensus_endpoint(client):
     r = client.get("/odds/consensus?event=evtX&market=1x2").json()
     assert r["n_sources"] == 3 and r["sharp_present"] is True

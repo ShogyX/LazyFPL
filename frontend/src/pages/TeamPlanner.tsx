@@ -5,7 +5,7 @@ import Pitch, { type PitchPlayer } from "../components/Pitch";
 import { BarChart } from "../components/charts";
 import PlayerAvatar, { TeamBadge } from "../components/PlayerAvatar";
 import { Button, Card, Conf, CountUp, Hint, Mini, Segmented, Spinner, TextInput } from "../components/ui";
-import { api, type ChipContext, type PlannerResult, type Squad, type TrackedDetail } from "../lib/api";
+import { api, type CaptainCandidate, type ChipContext, type PlannerResult, type Squad, type TrackedDetail } from "../lib/api";
 
 export default function TeamPlanner() {
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.settings });
@@ -111,7 +111,7 @@ function Loaded({ entryId, season, gw, version }: { entryId: number; season: str
             ? <PlayerDetail elementId={selected} season={season} preds={preds.data?.players ?? []} onClose={() => setSelected(null)} />
             : (
               <>
-                <CaptainCard starters={tracked.data} preds={preds.data?.players ?? []} capId={capId} setCapId={setCapId} />
+                <CaptainCard entryId={entryId} season={season} gw={gw} version={version} starters={tracked.data} preds={preds.data?.players ?? []} capId={capId} setCapId={setCapId} />
                 <TransferCard planner={planner.data} loading={planner.isLoading} error={planner.error ? String(planner.error) : null} />
                 <ChipCard ctx={planner.data?.chip_context ?? null} />
               </>
@@ -155,46 +155,64 @@ function HeadStat({ label, children, accent, big }: { label: string; children: R
 }
 
 // ---------- captain ----------
-function CaptainCard({ starters, preds, capId, setCapId }: {
+function CaptainCard({ entryId, season, gw, version, starters, preds, capId, setCapId }: {
+  entryId: number; season: string; gw: number; version: string;
   starters: TrackedDetail | undefined; preds: { element_id: number; name: string; team: string | null; code: number | null; position: string | null; xp_next1: number | null; confidence?: number | null }[];
   capId: number | null; setCapId: (id: number) => void;
 }) {
-  const xp = (id: number) => preds.find((p) => p.element_id === id)?.xp_next1 ?? 0;
-  const meta = (id: number) => preds.find((p) => p.element_id === id);
-  // candidates: your starters by xP (fallback to top predictions if no roster).
-  const ids = starters ? starters.picks.filter((p) => (p.slot ?? 99) <= 11).map((p) => p.element_id) : preds.slice(0, 6).map((p) => p.element_id);
+  // Distributional captaincy: Monte-Carlo EV + ceiling/floor/haul from the engine.
+  const cap = useQuery({ queryKey: ["captaincy", entryId, season, gw, version], queryFn: () => api.captaincy(entryId, season, gw, version), retry: false });
+  const dist = useMemo(() => {
+    const m = new Map<number, CaptainCandidate>();
+    cap.data?.candidates.forEach((c) => m.set(c.element_id, c));
+    return m;
+  }, [cap.data]);
+
+  const xp = (id: number) => dist.get(id)?.ev ?? preds.find((p) => p.element_id === id)?.xp_next1 ?? 0;
+  const meta = (id: number) => { const d = dist.get(id); const p = preds.find((q) => q.element_id === id); return { name: d?.name ?? p?.name, team: d?.team ?? p?.team, code: d?.code ?? p?.code, position: d?.position ?? p?.position, confidence: p?.confidence }; };
+  // candidates ranked by engine EV: prefer the distribution list, else starters/preds by xP.
+  const ids = dist.size ? cap.data!.candidates.map((c) => c.element_id)
+    : starters ? starters.picks.filter((p) => (p.slot ?? 99) <= 11).map((p) => p.element_id) : preds.slice(0, 6).map((p) => p.element_id);
   const cands = [...ids].sort((a, b) => xp(b) - xp(a)).slice(0, 5);
   const pickId = capId ?? starters?.picks.find((p) => p.captain)?.element_id ?? cands[0];
   if (!pickId) return <Card title="Captain"><Hint>No prediction data for this gameweek yet.</Hint></Card>;
-  const pm = meta(pickId);
+  const pm = meta(pickId); const pd = dist.get(pickId);
   const ceil = Math.max(...cands.map((id) => xp(id) * 2.4), 1);
   return (
     <Card title="Captain" right={<span className="tag tag-good"><Crown size={12} /> Pick</span>}>
       <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 14 }}>
         <div style={{ position: "relative" }}>
-          <PlayerAvatar player={{ name: pm?.name ?? "", team: pm?.team, position: pm?.position, code: pm?.code }} size={56} />
+          <PlayerAvatar player={{ name: pm.name ?? "", team: pm.team, position: pm.position, code: pm.code }} size={56} />
           <span style={{ position: "absolute", right: -4, bottom: -4, width: 22, height: 22, borderRadius: 999, background: "var(--accent)", color: "var(--accent-ink)", fontWeight: 800, fontSize: 12, display: "grid", placeItems: "center", border: "2px solid var(--surface)" }}>C</span>
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 18, fontWeight: 800 }}>{pm?.name}</div>
-          <div style={{ fontSize: 12.5, color: "var(--fg-dim)", display: "flex", alignItems: "center", gap: 7 }}><TeamBadge code={pm?.team} size={18} /> {pm?.position}</div>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>{pm.name}</div>
+          <div style={{ fontSize: 12.5, color: "var(--fg-dim)", display: "flex", alignItems: "center", gap: 7 }}><TeamBadge code={pm.team} size={18} /> {pm.position}</div>
         </div>
         <div style={{ textAlign: "right" }}>
           <div className="display" style={{ fontSize: 30, color: "var(--accent)" }}><CountUp value={xp(pickId) * 2} decimals={1} /></div>
           <div className="eyebrow">capt. xP</div>
         </div>
       </div>
+      {pd && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <DistStat label="Ceiling" value={`${(pd.ceiling * 2).toFixed(0)}`} accent />
+          <DistStat label="Floor" value={`${(pd.floor * 2).toFixed(0)}`} />
+          <DistStat label="Haul" value={`${Math.round(pd.haul * 100)}%`} />
+        </div>
+      )}
       <div style={{ display: "grid", gap: 6 }}>
         {cands.map((id) => {
-          const m = meta(id); const on = id === pickId;
+          const m = meta(id); const on = id === pickId; const d = dist.get(id);
           return (
             <button key={id} onClick={() => setCapId(id)} className="tx"
               style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 10, textAlign: "left", padding: "8px 10px", borderRadius: 10, cursor: "pointer", border: "1px solid " + (on ? "var(--accent)" : "var(--line)"), background: on ? "var(--accent-faint)" : "var(--surface-2)" }}>
-              <PlayerAvatar player={{ name: m?.name ?? "", team: m?.team, position: m?.position, code: m?.code }} size={30} ring={false} />
+              <PlayerAvatar player={{ name: m.name ?? "", team: m.team, position: m.position, code: m.code }} size={30} ring={false} />
               <div style={{ minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ fontWeight: 700, fontSize: 13 }}>{m?.name}</span>
-                  {m?.confidence != null && <Conf v={m.confidence} />}
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>{m.name}</span>
+                  {m.confidence != null && <Conf v={m.confidence} />}
+                  {d && <span className="num" style={{ fontSize: 10.5, color: "var(--fg-faint)" }}>▲{(d.ceiling * 2).toFixed(0)} · {Math.round(d.haul * 100)}%</span>}
                 </div>
                 <div style={{ marginTop: 3, height: 6, position: "relative" }}>
                   <div className="mbar" style={{ position: "absolute", inset: 0 }}><i style={{ width: `${(xp(id) * 2 / ceil) * 100}%`, background: "linear-gradient(90deg, var(--line-2), var(--accent))" }} /></div>
@@ -206,6 +224,15 @@ function CaptainCard({ starters, preds, capId, setCapId }: {
         })}
       </div>
     </Card>
+  );
+}
+
+function DistStat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div style={{ flex: 1, padding: "7px 9px", borderRadius: 9, border: "1px solid var(--line)", background: "var(--surface-2)", textAlign: "center" }}>
+      <div className="display num" style={{ fontSize: 17, color: accent ? "var(--accent)" : "var(--fg)" }}>{value}</div>
+      <div className="eyebrow" style={{ marginTop: 2 }}>{label}</div>
+    </div>
   );
 }
 

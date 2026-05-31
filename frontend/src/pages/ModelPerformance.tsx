@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Info, Search } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Info, Play, Search } from "lucide-react";
 import { BarChart, LineChart, type Series } from "../components/charts";
 import PlayerAvatar, { TeamBadge } from "../components/PlayerAvatar";
-import { Card, Chip, Conf, CountUp, Eyebrow, ErrorBox, MiniBar, Segmented, Spinner, StatTile, TextInput, Hint } from "../components/ui";
+import { Button, Card, Chip, Conf, CountUp, Eyebrow, ErrorBox, MiniBar, Segmented, Spinner, StatTile, TextInput, Hint } from "../components/ui";
 import { SERIES } from "../lib/teams";
 import { api, type CompareRun, type HedgeWeights, type OptimalXi, type PlayerSearchResult } from "../lib/api";
 
@@ -105,6 +105,7 @@ function Compare({ runs, season }: { runs: CompareRun[]; season: string }) {
             {label(r.strategy)}
           </Chip>
         ))}
+        <div style={{ marginLeft: "auto" }}><EngineRunButton season={season} /></div>
       </div>
       <div className="cmp-grid" style={{ display: "grid", gap: "var(--gap)", gridTemplateColumns: "minmax(0,1.1fr) minmax(300px,0.9fr)", alignItems: "start" }}>
         <Card title={metric === "cumulative" ? "Cumulative points" : metric === "weekly" ? "Points per gameweek" : "Season totals"}
@@ -147,6 +148,28 @@ function Compare({ runs, season }: { runs: CompareRun[]; season: string }) {
         </Card>
       </div>
     </div>
+  );
+}
+
+// Triggers the "follow the engine completely" backtest for a season and refreshes
+// the compare view once the off-request run clears.
+function EngineRunButton({ season }: { season: string }) {
+  const qc = useQueryClient();
+  const running = useQuery({ queryKey: ["bt-running"], queryFn: api.backtestsRunning, refetchInterval: 4000 });
+  const isRunning = !!running.data?.running.includes(season);
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (wasRunning.current && !isRunning) qc.invalidateQueries({ queryKey: ["compare", "all"] });
+    wasRunning.current = isRunning;
+  }, [isRunning, qc]);
+  const run = useMutation({ mutationFn: () => api.runBacktest(season), onSuccess: () => running.refetch() });
+  if (!season) return null;
+  return (
+    <Button variant="ghost" icon={<Play size={14} />} loading={run.isPending || isRunning}
+      disabled={run.isPending || isRunning} onClick={() => run.mutate()}
+      title="Replay this season following the engine's transfers + chips">
+      {isRunning ? "Running engine…" : "Run full-engine backtest"}
+    </Button>
   );
 }
 

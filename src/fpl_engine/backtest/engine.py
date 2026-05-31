@@ -357,6 +357,14 @@ class Backtester:
             # one of each) and fold their realised uplift into the GW they were
             # played — so the persisted total IS the points a manager who follows
             # the engine's transfer + chip advice would have scored.
+            #
+            # Transfers use the single-GW value_aware_gw executor (above), which
+            # shares the served TransferPlanner's budget, FPL selling-price and
+            # captain-EV model. We deliberately do NOT drive the multi-GW
+            # TransferPlanner here: planning GW g+k at decision-time g would need
+            # that future GW's causal panel features, which embed results not yet
+            # known at g — i.e. look-ahead leakage. The leakage-safe season replay
+            # is therefore a receding single-GW execution of the same engine.
             chip_bonus, chips = self._chip_bonuses_live(per_gw, self.chip_horizon)
             by_gw = {row["gw"]: row for row in per_gw if "gw" in row}
             for chip, info in chips.items():

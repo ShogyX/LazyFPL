@@ -7,9 +7,10 @@ engine's output end-to-end. Read-only; queries the NORMALISED/SERVING tables.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, or_, select
 
@@ -68,6 +69,27 @@ _POS = ("GK", "DEF", "MID", "FWD")
 
 def _pos(et: int | None) -> str | None:
     return _POS[et - 1] if et in (1, 2, 3, 4) else None
+
+
+# Guard so a UI-triggered engine backtest can't pile up concurrent season replays.
+_BT_LOCK = threading.Lock()
+_BT_RUNNING: set[str] = set()
+
+
+def _run_engine_backtest(season: str, version: str, from_gw: int, to_gw: int) -> None:
+    """Replay a season following the engine completely (value-aware transfers +
+    live chips) and store it under the 'engine' strategy. Runs off-request."""
+    from ..backtest import Backtester
+    from ..model.predictors import default_predictors
+    try:
+        preds = default_predictors(include_model=True)
+        engine_pred = preds.get(f"model:{version}") or preds.get("model:v1") \
+            or preds.get("hedge") or next(iter(preds.values()))
+        Backtester(model_version=version, free_hit=True).run(
+            season, list(range(from_gw, to_gw + 1)), engine_pred, policy="engine")
+    finally:
+        with _BT_LOCK:
+            _BT_RUNNING.discard(season)
 
 
 def create_app() -> FastAPI:
@@ -164,6 +186,27 @@ def create_app() -> FastAPI:
         with sm() as s:
             rows = s.execute(stmt).mappings().all()
         return {"backtests": [dict(row) for row in rows]}
+
+    @app.post("/backtests/run")
+    def run_backtest(background: BackgroundTasks, season: str,
+                     version: str = "v1",
+                     from_gw: int = Query(1, ge=1, le=38),
+                     to_gw: int = Query(38, ge=1, le=38)) -> dict:
+        """Kick off a 'follow the engine completely' backtest off-request. The
+        result lands in /backtests under the 'engine' strategy when it finishes."""
+        if to_gw < from_gw:
+            raise HTTPException(422, "to_gw must be >= from_gw")
+        with _BT_LOCK:
+            if season in _BT_RUNNING:
+                raise HTTPException(409, f"an engine backtest for {season} is already running")
+            _BT_RUNNING.add(season)
+        background.add_task(_run_engine_backtest, season, version, from_gw, to_gw)
+        return {"status": "started", "season": season, "strategy": "engine"}
+
+    @app.get("/backtests/running")
+    def backtests_running() -> dict:
+        with _BT_LOCK:
+            return {"running": sorted(_BT_RUNNING)}
 
     @app.get("/odds/consensus")
     def odds_consensus(event: str, market: str = "1x2") -> dict:
@@ -446,6 +489,45 @@ def create_app() -> FastAPI:
         if not roster:
             raise HTTPException(404, "no tracked roster; POST /track/{entry} first")
         return _chip_schedule(roster, season, gw, horizon, version)
+
+    @app.get("/captaincy")
+    def captaincy(entry: int, season: str, gw: int, version: str = "v1") -> dict:
+        """Distributional captaincy for a tracked roster: Monte-Carlo EV, ceiling,
+        floor and haul probability per player, ranked by expected value."""
+        from ..ingest.entry import EntryIngestor
+        from ..ingest.fetch import FetchClient
+        from ..model.captaincy import captain_distributions
+        fetch = FetchClient()
+        try:
+            roster = set(EntryIngestor(fetch).latest_roster(entry))
+        finally:
+            fetch.close()
+        if not roster:
+            raise HTTPException(404, "no tracked roster; POST /track/{entry} first")
+        dists = captain_distributions(season, gw, roster, sm=sm)
+        if not dists:
+            raise HTTPException(404, "no features for that season/gw")
+        pl, t = players.c, teams.c
+        with sm() as s:
+            meta = s.execute(
+                select(pl.id, pl.web_name, pl.element_type, pl.code, pl.status, t.short_name)
+                .select_from(players.join(teams, pl.team_id == t.id, isouter=True))
+                .where(pl.id.in_(dists))
+            ).all()
+        by_id = {int(m.id): m for m in meta}
+        cands = []
+        for eid, d in dists.items():
+            m = by_id.get(eid)
+            cands.append({
+                "element_id": eid, "name": m.web_name if m else str(eid),
+                "position": _pos(m.element_type) if m else None,
+                "team": m.short_name if m else None, "code": m.code if m else None,
+                "status": m.status if m else None,
+                "ev": d.ev, "floor": d.floor, "median": d.median, "ceiling": d.ceiling,
+                "std": d.std, "haul": d.haul, "blank": d.blank,
+            })
+        cands.sort(key=lambda c: c["ev"], reverse=True)
+        return {"season": season, "gw": gw, "candidates": cands}
 
     # ---- F4+: predicted-vs-actual analytics --------------------------------
     @app.get("/accuracy")

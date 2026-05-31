@@ -3,19 +3,21 @@
 // API at "/api" and serves this SPA at the root — same origin, no CORS.
 const BASE = "/api";
 
+function qstr(params?: Record<string, unknown>): string {
+  if (!params) return "";
+  const s = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .flatMap(([k, v]) =>
+      (Array.isArray(v) ? v : [v]).map(
+        (item) => `${encodeURIComponent(k)}=${encodeURIComponent(String(item))}`,
+      ),
+    )
+    .join("&");
+  return s ? "?" + s : "";
+}
+
 async function get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
-  const qs = params
-    ? "?" +
-      Object.entries(params)
-        .filter(([, v]) => v !== undefined && v !== null && v !== "")
-        .flatMap(([k, v]) =>
-          (Array.isArray(v) ? v : [v]).map(
-            (item) => `${encodeURIComponent(k)}=${encodeURIComponent(String(item))}`,
-          ),
-        )
-        .join("&")
-    : "";
-  const res = await fetch(`${BASE}${path}${qs}`);
+  const res = await fetch(`${BASE}${path}${qstr(params)}`);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText} — ${path} ${body}`.trim());
@@ -23,8 +25,9 @@ async function get<T>(path: string, params?: Record<string, unknown>): Promise<T
   return res.json() as Promise<T>;
 }
 
-async function send<T>(method: "PUT" | "POST", path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+async function send<T>(method: "PUT" | "POST", path: string, body?: unknown,
+                       params?: Record<string, unknown>): Promise<T> {
+  const res = await fetch(`${BASE}${path}${qstr(params)}`, {
     method,
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -261,6 +264,28 @@ export interface PlannerResult {
   chip_context?: ChipContext | null;
 }
 
+export interface CaptainCandidate {
+  element_id: number;
+  name: string;
+  position: Position | null;
+  team: string | null;
+  code: number | null;
+  status: string | null;
+  ev: number;
+  floor: number;
+  median: number;
+  ceiling: number;
+  std: number;
+  haul: number;
+  blank: number;
+}
+
+export interface Captaincy {
+  season: string;
+  gw: number;
+  candidates: CaptainCandidate[];
+}
+
 export const api = {
   health: () => get<{ status: string }>("/health"),
   predictions: (season: string, gw: number, version = "v1", position?: number, limit = 100) =>
@@ -306,4 +331,11 @@ export const api = {
   trackEntry: (entryId: number) => send<TrackedEntry>("POST", `/track/${entryId}`),
   planner: (entry: number, season: string, gw: number, opts?: { version?: string; horizon?: number; ft?: number; eo_weight?: number }) =>
     get<PlannerResult>("/planner", { entry, season, gw, ...opts }),
+  captaincy: (entry: number, season: string, gw: number, version = "v1") =>
+    get<Captaincy>("/captaincy", { entry, season, gw, version }),
+
+  // ---- backtest trigger (follow-the-engine) ----
+  runBacktest: (season: string, opts?: { version?: string; from_gw?: number; to_gw?: number }) =>
+    send<{ status: string; season: string; strategy: string }>("POST", "/backtests/run", undefined, { season, ...opts }),
+  backtestsRunning: () => get<{ running: string[] }>("/backtests/running"),
 };
