@@ -525,6 +525,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         if rc != 0:
             failed.append(name)
             log.warning("bootstrap stage failed", extra={"stage": name, "rc": rc})
+            # OOM killer sends SIGKILL → rc -9 (137 via a shell). The study/freeze
+            # stages are the memory peak; tell the user how to fit a smaller box.
+            if rc in (-9, 137):
+                print(f"\n[!] '{name}' was killed — most likely out of memory. "
+                      f"Re-run with fewer seasons, e.g. `fpl bootstrap --years 3` "
+                      f"(memory scales with the season count).\n", flush=True)
         _progress_bar(i, total, name if rc == 0 else f"{name}  [FAILED rc={rc}]")
         print(flush=True)
 

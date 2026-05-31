@@ -278,21 +278,38 @@ enable_services() {
 
 # --- one-time history backfill + model training ----------------------------
 # The app needs historical data and a trained model to be useful. It's heavy
-# (10-30+ min) so we run it BEFORE starting the services: on small (8GB) hosts
-# the always-on API plus the scheduler's hourly ingest otherwise contend for
+# (10-30+ min) so we run it BEFORE starting the services: on small hosts the
+# always-on API plus the scheduler's hourly ingest otherwise contend for
 # RAM/CPU/DB and make training crawl — which looks like a hang. Foreground
 # bootstrap → then services (so the API serves a trained model immediately).
 # --bootstrap-bg explicitly opts into a detached run alongside the services.
+#
+# Peak RAM scales with the number of seasons fed through the study/freeze stages
+# (~1GB/season + ~2GB base; 6 seasons ≈ 6GB). Size the season window to the
+# box's RAM so a small VM trains a (slightly smaller) model instead of OOMing /
+# swapping to a standstill. Override with FPL_BOOTSTRAP_YEARS, or run
+# `fpl bootstrap --all-seasons` by hand on a big box.
+BOOT_YEARS="${FPL_BOOTSTRAP_YEARS:-}"
+if [ -z "$BOOT_YEARS" ] && [ -r /proc/meminfo ]; then
+  MEM_GB=$(awk '/^MemTotal:/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+  if   [ "${MEM_GB:-0}" -le 4 ]; then BOOT_YEARS=3
+  elif [ "${MEM_GB:-0}" -le 6 ]; then BOOT_YEARS=4
+  fi
+  [ -n "$BOOT_YEARS" ] && warn "Detected ~${MEM_GB}GB RAM — limiting the bootstrap to the last ${BOOT_YEARS} seasons to avoid OOM (override: FPL_BOOTSTRAP_YEARS=N, or 'fpl bootstrap --all-seasons' on a bigger box)."
+fi
+BOOT_ARGS=""
+[ -n "$BOOT_YEARS" ] && BOOT_ARGS="--years $BOOT_YEARS"
+
 if [ "$DO_BOOTSTRAP" -eq 1 ] && [ "$BOOTSTRAP" != "bg" ]; then
-  info "Backfilling all seasons + training the model (one-time, 10-30+ min; runs alone before services start)…"
-  fpl bootstrap | tee -a "$REPO_DIR/bootstrap.log" || warn "bootstrap reported errors — see bootstrap.log; you can re-run: fpl bootstrap"
+  info "Backfilling history + training the model (one-time, 10-30+ min; runs alone before services start)…"
+  fpl bootstrap $BOOT_ARGS | tee -a "$REPO_DIR/bootstrap.log" || warn "bootstrap reported errors — see bootstrap.log; you can re-run: fpl bootstrap"
 fi
 
 enable_services
 
 if [ "$DO_BOOTSTRAP" -eq 1 ] && [ "$BOOTSTRAP" = "bg" ]; then
   info "Backfilling history + training the model in the background -> bootstrap.log"
-  nohup "$REPO_DIR/.venv/bin/fpl" bootstrap >>"$REPO_DIR/bootstrap.log" 2>&1 &
+  nohup "$REPO_DIR/.venv/bin/fpl" bootstrap $BOOT_ARGS >>"$REPO_DIR/bootstrap.log" 2>&1 &
   info "Running detached (10-30+ min). Watch it: tail -f $REPO_DIR/bootstrap.log"
   [ "$WITH_SCHEDULER" -eq 1 ] && command -v systemctl >/dev/null 2>&1 \
     && warn "When bootstrap.log shows completion, load the model: sudo systemctl restart lazyfpl-api"

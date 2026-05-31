@@ -71,6 +71,13 @@ trained model to serve, so the install finishes with a working app rather than a
 empty one. It's heavy (10–30+ min) and runs in the foreground by default (also
 logged to `bootstrap.log`); the scheduler then keeps the current season fresh.
 
+**Memory:** the bootstrap's study/freeze stages are the peak (~1GB/season + ~2GB
+base; the full 6-season default ≈ 6GB). On ≤4GB it trains alone on the last 3
+seasons, ≤6GB on 4, ≥8GB on all 6 — install.sh sizes this from `/proc/meminfo`.
+Override with `FPL_BOOTSTRAP_YEARS=N ./install.sh …`, or train the full history
+by hand with `fpl bootstrap --all-seasons` on a larger box. Give the VM ~8GB for
+the full model; a 4GB box works but trains a slightly smaller one.
+
 Flags: `--with-scheduler` (install & start services), `--no-system-deps` (skip
 apt/PostgreSQL/Node provisioning), `--bootstrap-bg` (run the backfill detached
 instead of inline), `--no-bootstrap` (skip it).
