@@ -1,575 +1,304 @@
 import { useMemo, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import {
-  Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, ResponsiveContainer,
-  Tooltip, XAxis, YAxis,
-} from "recharts";
-import { Search } from "lucide-react";
-import { PageHeader, Card } from "../components/Layout";
-import PlayerAvatar from "../components/PlayerAvatar";
-import { Chip, ErrorBox, Mini, Select, Spinner, TextInput } from "../components/ui";
-import {
-  api, type Accuracy, type CompareRun, type HedgeWeights, type OptimalXi,
-  type PlayerPrediction, type PlayerSearchResult,
-} from "../lib/api";
+import { Info, Search } from "lucide-react";
+import { BarChart, LineChart, type Series } from "../components/charts";
+import PlayerAvatar, { TeamBadge } from "../components/PlayerAvatar";
+import { Card, Chip, CountUp, Eyebrow, ErrorBox, MiniBar, Segmented, Spinner, StatTile, TextInput, Hint } from "../components/ui";
+import { SERIES } from "../lib/teams";
+import { api, type CompareRun, type HedgeWeights, type OptimalXi, type PlayerSearchResult } from "../lib/api";
 
-const PALETTE = ["#1e40af", "#d97706", "#15803d", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#0d9488", "#9333ea"];
-type Tab = "comparison" | "trend" | "predictions" | "accuracy" | "weights" | "players";
+const TABS = [
+  { value: "compare", label: "Compare" },
+  { value: "accuracy", label: "Predicted vs actual" },
+  { value: "optimal", label: "Optimal XI" },
+  { value: "weights", label: "Weight adaptation" },
+  { value: "players", label: "Player search" },
+];
 
 export default function ModelPerformance() {
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.settings });
   const all = useQuery({ queryKey: ["compare", "all"], queryFn: () => api.compareModels() });
-
   const seasons = useMemo(() => uniq(all.data?.runs.map((r) => r.season)).sort().reverse(), [all.data]);
-  const strategies = useMemo(() => uniq(all.data?.runs.map((r) => r.strategy)).sort(), [all.data]);
-
-  const [tab, setTab] = useState<Tab>("comparison");
   const [season, setSeason] = useState<string>("");
-  const [picked, setPicked] = useState<string[]>([]);
-
-  // Default season + a handful of strategies once data lands.
+  const [tab, setTab] = useState("compare");
   const effSeason = season || seasons[0] || "";
-  const effPicked = picked.length ? picked : strategies.slice(0, 4);
-
   const version = settings.data?.general.active_model ?? "v1";
 
-  if (all.isLoading) return <><Hdr /><Loading /></>;
-  if (all.error) return <><Hdr /><ErrorBox message={String(all.error)} /></>;
-
   return (
-    <>
-      <Hdr />
-      <div className="mb-4 flex flex-wrap items-end gap-3">
-        <Mini label="Season">
-          <div style={{ width: 130 }}>
-            <Select value={effSeason} onChange={(e) => setSeason(e.target.value)}>
+    <div className="fade-up" style={{ display: "grid", gap: "var(--gap)" }}>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 14, flexWrap: "wrap" }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: "clamp(22px,3vw,30px)", fontWeight: 800, letterSpacing: "-0.025em" }}>Model performance</h1>
+          <p style={{ margin: "4px 0 0", fontSize: 13.5, color: "var(--fg-dim)" }}>Leakage-safe walk-forward backtests · hover anything to compare.</p>
+        </div>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center", overflowX: "auto", maxWidth: "100%" }}>
+          {seasons.length > 0 && (
+            <select className="seg" style={{ padding: "7px 10px", borderRadius: 9, color: "var(--fg)" }} value={effSeason} onChange={(e) => setSeason(e.target.value)}>
               {seasons.map((s) => <option key={s} value={s}>{s}</option>)}
-            </Select>
-          </div>
-        </Mini>
-        <div className="flex flex-wrap gap-1">
-          {strategies.map((s, i) => {
-            const on = effPicked.includes(s);
-            return (
-              <Chip
-                key={s}
-                active={on}
-                color={PALETTE[i % PALETTE.length]}
-                onClick={() => setPicked(on ? effPicked.filter((x) => x !== s) : [...effPicked, s])}
-              >
-                {s}
-              </Chip>
-            );
-          })}
+            </select>
+          )}
+          <Segmented value={tab} onChange={setTab} options={TABS} />
         </div>
       </div>
-
-      <Tabs tab={tab} onTab={setTab} />
-
-      <div className="mt-4">
-        {tab === "comparison" && <Comparison runs={all.data!.runs} season={effSeason} picked={effPicked} />}
-        {tab === "trend" && <Trend runs={all.data!.runs} season={effSeason} picked={effPicked} />}
-        {tab === "predictions" && <Predictions season={effSeason} version={version} />}
-        {tab === "accuracy" && <AccuracyTab season={effSeason} version={version} />}
-        {tab === "weights" && <Weights season={effSeason} />}
-        {tab === "players" && <Players season={effSeason} />}
-      </div>
-    </>
-  );
-}
-
-function Hdr() {
-  return (
-    <PageHeader
-      title="Model Performance"
-      subtitle="Compare models across seasons and gameweeks — per-GW predictions, player search, confidence, and KPIs."
-    />
-  );
-}
-
-function Tabs({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
-  const items: [Tab, string][] = [
-    ["comparison", "Season comparison"],
-    ["trend", "Per-GW trend"],
-    ["predictions", "Predictions"],
-    ["accuracy", "Predicted vs actual"],
-    ["weights", "Weight adaptation"],
-    ["players", "Player search"],
-  ];
-  return (
-    <div className="flex gap-1 border-b border-border">
-      {items.map(([k, label]) => (
-        <button
-          key={k}
-          onClick={() => onTab(k)}
-          className={`-mb-px border-b-2 px-3 py-2 text-sm transition ${
-            tab === k ? "border-primary font-medium text-fg" : "border-transparent text-muted-fg hover:text-fg"
-          }`}
-        >
-          {label}
-        </button>
-      ))}
+      {all.isLoading && <Spinner />}
+      {all.error && <ErrorBox message={String(all.error)} />}
+      {all.data && tab === "compare" && <Compare runs={all.data.runs} season={effSeason} />}
+      {tab === "accuracy" && <AccuracyTab season={effSeason} version={version} />}
+      {tab === "optimal" && <OptimalTab season={effSeason} version={version} />}
+      {tab === "weights" && <WeightsTab season={effSeason} />}
+      {tab === "players" && <PlayersTab season={effSeason} />}
     </div>
   );
 }
 
-// ---- Season comparison: bar chart of totals + KPI tiles ----
-function Comparison({ runs, season, picked }: { runs: CompareRun[]; season: string; picked: string[] }) {
-  const rows = runs.filter((r) => r.season === season && picked.includes(r.strategy));
-  if (rows.length === 0) return <Card title="Season comparison"><Hint>Select a season and at least one strategy.</Hint></Card>;
-  const data = rows.map((r) => ({ strategy: r.strategy, points: r.total_points, net: r.net_points }));
-  const best = [...rows].sort((a, b) => b.total_points - a.total_points)[0];
-  return (
-    <div className="grid gap-4">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Kpi label="Best strategy" value={best.strategy} />
-        <Kpi label="Best total" value={best.total_points} />
-        <Kpi label="Net (best)" value={best.net_points} />
-        <Kpi label="Hits (best)" value={best.total_hits} />
-      </div>
-      <Card title={`Total points — ${season}`}>
-        <div className="h-80">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data} margin={{ top: 8, right: 8, bottom: 40, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-              <XAxis dataKey="strategy" angle={-30} textAnchor="end" interval={0} tick={chartTick} height={60} />
-              <YAxis tick={chartTick} />
-              <Tooltip contentStyle={tooltipStyle} />
-              <Bar dataKey="points" name="Total" radius={[3, 3, 0, 0]}>
-                {data.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </Card>
-      <Card title="Detail">
-        <Table
-          head={["Strategy", "GWs", "Total", "Net", "Hits"]}
-          rows={rows.map((r) => [r.strategy, `${r.start_gw}–${r.end_gw}`, r.total_points, r.net_points, r.total_hits])}
-        />
-      </Card>
-    </div>
-  );
-}
+// ---------------- Compare ----------------
+function Compare({ runs, season }: { runs: CompareRun[]; season: string }) {
+  const seasonRuns = useMemo(() => {
+    const seen = new Set<string>(); const out: (CompareRun & { idx: number })[] = [];
+    runs.filter((r) => r.season === season).forEach((r) => { if (!seen.has(r.strategy)) { seen.add(r.strategy); out.push({ ...r, idx: out.length }); } });
+    return out.sort((a, b) => b.total_points - a.total_points).map((r, i) => ({ ...r, idx: i }));
+  }, [runs, season]);
 
-// ---- Per-GW trend: cumulative points line chart over a configurable range ----
-function Trend({ runs, season, picked }: { runs: CompareRun[]; season: string; picked: string[] }) {
-  const rows = runs.filter((r) => r.season === season && picked.includes(r.strategy));
-  const allGws = uniq(rows.flatMap((r) => r.per_gw.map((g) => g.gw))).sort((a, b) => a - b);
-  const [lo, setLo] = useState<number | "">("");
-  const [hi, setHi] = useState<number | "">("");
-  const minGw = allGws[0] ?? 1;
-  const maxGw = allGws[allGws.length - 1] ?? 38;
-  const loV = lo === "" ? minGw : lo;
-  const hiV = hi === "" ? maxGw : hi;
+  const [picked, setPicked] = useState<string[] | null>(null);
+  const eff = picked ?? seasonRuns.slice(0, 4).map((r) => r.strategy);
+  const [metric, setMetric] = useState("cumulative");
+  const [focus, setFocus] = useState<string | null>(null);
+  const ngw = Math.max(1, ...seasonRuns.flatMap((r) => r.per_gw.map((g) => g.gw)));
+  const [range, setRange] = useState<[number, number]>([1, 38]);
+  const lo = Math.min(range[0], ngw), hi = Math.min(range[1], ngw);
 
-  const data = useMemo(() => {
-    const byGw = new Map<number, Record<string, number>>();
-    for (const r of rows) {
-      let cum = 0;
-      for (const g of [...r.per_gw].sort((a, b) => a.gw - b.gw)) {
-        cum += g.points ?? 0;
-        if (g.gw < loV || g.gw > hiV) continue;
-        const slot = byGw.get(g.gw) ?? { gw: g.gw };
-        slot[r.strategy] = cum;
-        byGw.set(g.gw, slot);
-      }
+  const sel = seasonRuns.filter((r) => eff.includes(r.strategy));
+  const color = (r: { idx: number }) => SERIES[r.idx % 6];
+
+  const chartData = useMemo(() => {
+    const rows: Record<string, number>[] = [];
+    const cum: Record<string, number> = {};
+    for (let gw = 1; gw <= ngw; gw++) {
+      const row: Record<string, number> = { gw };
+      sel.forEach((r) => {
+        const g = r.per_gw.find((p) => p.gw === gw);
+        cum[r.strategy] = (cum[r.strategy] ?? 0) + (g?.points ?? 0);
+        if (gw >= lo && gw <= hi && g) row[r.strategy] = metric === "cumulative" ? cum[r.strategy] : (g.points ?? 0);
+      });
+      if (gw >= lo && gw <= hi) rows.push(row);
     }
-    return [...byGw.values()].sort((a, b) => (a.gw as number) - (b.gw as number));
-  }, [rows, loV, hiV]);
+    return rows;
+  }, [sel, metric, lo, hi, ngw]);
 
-  if (rows.length === 0) return <Card title="Per-GW trend"><Hint>Select a season and at least one strategy.</Hint></Card>;
+  const series: Series[] = sel.map((r) => ({
+    key: r.strategy, label: r.strategy, color: focus && focus !== r.strategy ? "color-mix(in srgb, " + color(r) + " 38%, var(--surface))" : color(r),
+    width: focus && focus !== r.strategy ? 1.3 : 2.6,
+  }));
+  const leader = sel.length ? sel.reduce((a, b) => (b.total_points > a.total_points ? b : a)) : null;
 
+  if (!season) return <Hint>No backtest data.</Hint>;
   return (
-    <Card title={`Cumulative points — ${season}`}>
-      <div className="mb-3 flex items-end gap-3">
-        <Mini label={`From GW (min ${minGw})`}>
-          <TextInput style={{ width: 90 }} type="number" min={minGw} max={maxGw} value={lo} placeholder={String(minGw)} onChange={(e) => setLo(e.target.value === "" ? "" : Number(e.target.value))} />
-        </Mini>
-        <Mini label={`To GW (max ${maxGw})`}>
-          <TextInput style={{ width: 90 }} type="number" min={minGw} max={maxGw} value={hi} placeholder={String(maxGw)} onChange={(e) => setHi(e.target.value === "" ? "" : Number(e.target.value))} />
-        </Mini>
+    <div style={{ display: "grid", gap: "var(--gap)" }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <Eyebrow>Strategies</Eyebrow>
+        {seasonRuns.map((r) => (
+          <Chip key={r.strategy} on={eff.includes(r.strategy)} color={color(r)}
+            onClick={() => setPicked(eff.includes(r.strategy) ? eff.filter((k) => k !== r.strategy) : [...eff, r.strategy])}>
+            {r.strategy}
+          </Chip>
+        ))}
       </div>
-      <div className="h-80">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-            <XAxis dataKey="gw" tick={chartTick} />
-            <YAxis tick={chartTick} />
-            <Tooltip contentStyle={tooltipStyle} />
-            <Legend wrapperStyle={{ fontSize: 12 }} />
-            {rows.map((r, i) => (
-              <Line key={r.strategy} type="monotone" dataKey={r.strategy} stroke={PALETTE[picked.indexOf(r.strategy) % PALETTE.length] ?? PALETTE[i % PALETTE.length]} dot={false} strokeWidth={2} />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
+      <div className="cmp-grid" style={{ display: "grid", gap: "var(--gap)", gridTemplateColumns: "minmax(0,1.1fr) minmax(300px,0.9fr)", alignItems: "start" }}>
+        <Card title={metric === "cumulative" ? "Cumulative points" : metric === "weekly" ? "Points per gameweek" : "Season totals"}
+          right={<Segmented size="sm" value={metric} onChange={setMetric} options={[{ value: "cumulative", label: "Cumulative" }, { value: "weekly", label: "Weekly" }, { value: "totals", label: "Totals" }]} />}>
+          {metric === "totals"
+            ? <BarChart height={320} horizontalLabels data={sel.map((r) => ({ name: r.strategy, total: r.total_points, net: r.net_points }))} xKey="name"
+                series={[{ key: "total", label: "Total", color: "var(--s1)" }, { key: "net", label: "Net (after hits)", color: "var(--s0)" }]} xFormat={(v) => String(v)} />
+            : <>
+                <LineChart height={320} data={chartData} xKey="gw" xFormat={(v) => "GW" + v} series={series} legend={false} />
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10, flexWrap: "wrap" }}>
+                  <Eyebrow>GW range</Eyebrow>
+                  <input type="range" min={1} max={ngw} value={lo} onChange={(e) => setRange([Math.min(+e.target.value, hi - 1), hi])} style={{ flex: 1, minWidth: 80 }} />
+                  <input type="range" min={1} max={ngw} value={hi} onChange={(e) => setRange([lo, Math.max(+e.target.value, lo + 1)])} style={{ flex: 1, minWidth: 80 }} />
+                  <span className="num" style={{ fontSize: 12, color: "var(--fg-dim)" }}>GW{lo}–{hi}</span>
+                </div>
+              </>}
+        </Card>
+        <Card title="Leaderboard" right={<Eyebrow>vs leader</Eyebrow>}>
+          <div style={{ display: "grid", gap: 7 }}>
+            {sel.map((r, i) => {
+              const isF = focus === r.strategy; const dn = (leader?.total_points ?? 0) - r.total_points;
+              return (
+                <div key={r.strategy} className="tx" onMouseEnter={() => setFocus(r.strategy)} onMouseLeave={() => setFocus(null)}
+                  style={{ display: "grid", gridTemplateColumns: "20px auto 1fr auto", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: 10, border: "1px solid " + (isF ? "var(--line-2)" : "var(--line)"), background: isF ? "var(--surface-2)" : "transparent" }}>
+                  <span className="num" style={{ fontWeight: 800, color: i === 0 ? "var(--accent)" : "var(--fg-faint)", fontSize: 13 }}>{i + 1}</span>
+                  <span style={{ width: 11, height: 11, borderRadius: 3, background: color(r) }} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.strategy}</div>
+                    <div style={{ display: "flex", gap: 10, fontSize: 11, color: "var(--fg-faint)", marginTop: 2 }}><span className="num">net {r.net_points}</span><span className="num">{r.total_hits} hits</span></div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="display num" style={{ fontSize: 18 }}><CountUp value={r.total_points} /></div>
+                    {dn > 0 ? <div className="num down" style={{ fontSize: 11, fontWeight: 700 }}>−{dn}</div> : <div className="num up" style={{ fontSize: 11, fontWeight: 700 }}>leader</div>}
+                  </div>
+                </div>
+              );
+            })}
+            {sel.length === 0 && <Hint>Pick at least one strategy above to compare.</Hint>}
+          </div>
+        </Card>
       </div>
-    </Card>
+    </div>
   );
 }
 
-// ---- Sortable / filterable per-GW predictions ----
-type SortKey = "xp_next1" | "xp_next6" | "price" | "pred_minutes";
-function Predictions({ season, version }: { season: string; version: string }) {
-  const [gw, setGw] = useState(1);
-  const [pos, setPos] = useState<number | "">("");
-  const [q, setQ] = useState("");
-  const [byTeam, setByTeam] = useState(false);
-  const [sort, setSort] = useState<SortKey>("xp_next1");
-
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["predictions", season, gw, version, pos],
-    queryFn: () => api.predictions(season, gw, version, pos === "" ? undefined : pos, 1000),
-    enabled: !!season,
-    retry: false,
-    placeholderData: keepPreviousData,
-  });
-
-  const players = (data?.players ?? [])
-    .filter((p) => p.name.toLowerCase().includes(q.toLowerCase()) || (p.team ?? "").toLowerCase().includes(q.toLowerCase()))
-    .sort((a, b) => (b[sort] ?? -Infinity) - (a[sort] ?? -Infinity) as number);
-
-  const teamRows = useMemo(() => aggregateByTeam(players), [players]);
-
-  return (
-    <Card title={`Predictions — ${season || "?"} (${version})`}>
-      <div className="mb-3 flex flex-wrap items-end gap-3">
-        <Mini label="GW"><TextInput style={{ width: 64 }} type="number" min={1} max={38} value={gw} onChange={(e) => setGw(Number(e.target.value))} /></Mini>
-        <Mini label="Position">
-          <div style={{ width: 96 }}>
-            <Select value={pos} onChange={(e) => setPos(e.target.value === "" ? "" : Number(e.target.value))}>
-              <option value="">All</option><option value={1}>GK</option><option value={2}>DEF</option><option value={3}>MID</option><option value={4}>FWD</option>
-            </Select>
-          </div>
-        </Mini>
-        <Mini label="Sort by">
-          <div style={{ width: 130 }}>
-            <Select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
-              <option value="xp_next1">xP next</option><option value="xp_next6">xP next-6</option><option value="price">Price</option><option value="pred_minutes">Pred mins</option>
-            </Select>
-          </div>
-        </Mini>
-        <Mini label="Filter"><TextInput style={{ width: 150 }} placeholder="name / team" value={q} onChange={(e) => setQ(e.target.value)} /></Mini>
-        <label className="flex cursor-pointer items-center gap-1.5 text-sm text-fg">
-          <input type="checkbox" className="h-4 w-4 accent-[var(--color-primary)]" checked={byTeam} onChange={(e) => setByTeam(e.target.checked)} /> By team
-        </label>
-      </div>
-      {isLoading && <Loading />}
-      {error && <Hint>No predictions for {season} GW{gw}.</Hint>}
-      {data && !byTeam && (
-        <Table
-          head={["Player", "Team", "Pos", "xP", "xP-6", "Mins", "£"]}
-          rows={players.slice(0, 300).map((p) => [p.name, p.team ?? "—", p.position ?? "—", fmt(p.xp_next1), fmt(p.xp_next6), fmt(p.pred_minutes, 0), p.price.toFixed(1)])}
-        />
-      )}
-      {data && byTeam && (
-        <Table
-          head={["Team", "Players", "Σ xP", "Mean xP"]}
-          rows={teamRows.map((t) => [t.team, t.n, t.sum.toFixed(1), t.mean.toFixed(2)])}
-        />
-      )}
-    </Card>
-  );
-}
-
-// ---- Predicted vs actual: accuracy, calibration, optimal-XI ----
+// ---------------- Accuracy ----------------
 function AccuracyTab({ season, version }: { season: string; version: string }) {
   const acc = useQuery({ queryKey: ["accuracy", season, version], queryFn: () => api.accuracy(season, version), enabled: !!season, retry: false, placeholderData: keepPreviousData });
-  const oxi = useQuery({ queryKey: ["optimal-xi", season, version], queryFn: () => api.optimalXi(season, version), enabled: !!season, retry: false, placeholderData: keepPreviousData });
-
-  if (acc.isLoading) return <Loading />;
-  if (acc.error) return <ErrorBox message={String(acc.error)} />;
+  if (acc.isLoading) return <Spinner />;
   const a = acc.data;
-  if (!a || !a.overall) return <Card title="Predicted vs actual"><Hint>No stored predictions for {season} ({version}). Live predictions exist only for recent gameweeks.</Hint></Card>;
-
+  if (!a || !a.overall) return <Card title="Predicted vs actual"><Hint>No stored predictions for {season} ({version}).</Hint></Card>;
   return (
-    <div className="grid gap-4">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Kpi label="Rank IC" value={fmt(a.overall.ic)} />
-        <Kpi label="RMSE" value={fmt(a.overall.rmse)} />
-        <Kpi label="MAE" value={fmt(a.overall.mae)} />
-        <Kpi label="GWs / rows" value={`${a.overall.n_gws} / ${a.overall.n}`} />
+    <div style={{ display: "grid", gap: "var(--gap)" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: "var(--gap)" }}>
+        <StatTile label="Rank IC" value={a.overall.ic ?? 0} decimals={3} accent sub="information coefficient" />
+        <StatTile label="RMSE" value={a.overall.rmse ?? 0} decimals={2} sub="root-mean-square error" />
+        <StatTile label="MAE" value={a.overall.mae ?? 0} decimals={2} sub="mean abs. error" />
+        <StatTile label="Bias" value={a.overall.bias ?? 0} decimals={2} sub={`${a.overall.n.toLocaleString()} rows`} />
       </div>
-
-      <Card title="Per-GW accuracy">
-        <AccuracyChart data={a} />
+      <Card title="Per-gameweek accuracy" right={<Eyebrow>IC ↑ better · error ↓ better</Eyebrow>}>
+        <LineChart height={300} data={a.per_gw.map((g) => ({ gw: g.gw, ic: g.ic ?? 0, rmse: g.rmse ?? 0, mae: g.mae ?? 0 }))} xKey="gw" xFormat={(v) => "GW" + v}
+          series={[{ key: "ic", label: "Rank IC", color: "var(--s0)" }, { key: "rmse", label: "RMSE", color: "var(--s4)", axis: "right" }, { key: "mae", label: "MAE", color: "var(--s3)", axis: "right" }]}
+          yDomain={[0, 1]} yFormat={(v) => v.toFixed(2)} rightFormat={(v) => v.toFixed(1)} />
       </Card>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Calibration (predicted vs realised)">
-          <CalibrationChart data={a} />
-          <p className="mt-2 text-xs text-muted-fg">Points by predicted-xP bucket; close to the diagonal means well-calibrated.</p>
+      <div className="cmp-grid" style={{ display: "grid", gap: "var(--gap)", gridTemplateColumns: "minmax(0,1fr) minmax(280px,0.8fr)", alignItems: "start" }}>
+        <Card title="Calibration" right={<span style={{ color: "var(--fg-faint)" }}><Info size={14} /></span>}>
+          <BarChart height={250} data={a.calibration.map((c) => ({ bucket: c.bucket, pred: c.mean_pred ?? 0, actual: c.mean_actual ?? 0 }))} xKey="bucket"
+            series={[{ key: "pred", label: "Predicted", color: "var(--s2)" }, { key: "actual", label: "Actual", color: "var(--s0)" }]} xFormat={(v) => String(v)} yFormat={(v) => v.toFixed(1)} />
         </Card>
-        <Card title="Per-position accuracy">
-          <Table
-            head={["Pos", "n", "IC", "RMSE", "Bias"]}
-            rows={a.per_position.map((p) => [p.position, p.n, fmt(p.ic), fmt(p.rmse), fmt(p.bias)])}
-          />
+        <Card title="By position">
+          <div style={{ display: "grid", gap: 9 }}>
+            {a.per_position.map((p) => (
+              <div key={p.position} style={{ display: "grid", gridTemplateColumns: "44px 1fr auto", alignItems: "center", gap: 10 }}>
+                <span className="tag tag-flat" style={{ justifyContent: "center" }}>{p.position}</span>
+                <div>
+                  <MiniBar value={p.ic ?? 0} max={1} color="var(--s0)" />
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 11, color: "var(--fg-faint)" }}>
+                    <span className="num">RMSE {p.rmse?.toFixed(2)}</span><span className="num">bias {(p.bias ?? 0) > 0 ? "+" : ""}{p.bias?.toFixed(2)}</span>
+                  </div>
+                </div>
+                <span className="num display" style={{ fontSize: 16, color: "var(--accent)", width: 44, textAlign: "right" }}>{p.ic?.toFixed(2)}</span>
+              </div>
+            ))}
+          </div>
         </Card>
       </div>
+    </div>
+  );
+}
 
-      <Card title="Optimal XI — predicted vs actual">
-        {oxi.isLoading && <Loading />}
-        {oxi.data?.totals && <OptimalXiView data={oxi.data} />}
-        {oxi.data && !oxi.data.totals && <Hint>No optimal-XI history for {season}.</Hint>}
+// ---------------- Optimal XI ----------------
+function OptimalTab({ season, version }: { season: string; version: string }) {
+  const oxi = useQuery({ queryKey: ["optimal-xi", season, version], queryFn: () => api.optimalXi(season, version), enabled: !!season, retry: false, placeholderData: keepPreviousData });
+  if (oxi.isLoading) return <Spinner />;
+  const d: OptimalXi | undefined = oxi.data;
+  if (!d || !d.totals) return <Card title="Optimal XI"><Hint>No optimal-XI history for {season}.</Hint></Card>;
+  const realised = d.totals.sum_predicted ? (d.totals.sum_actual / d.totals.sum_predicted) * 100 : 0;
+  return (
+    <div style={{ display: "grid", gap: "var(--gap)" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: "var(--gap)" }}>
+        <StatTile label="Σ predicted xP" value={d.totals.sum_predicted} decimals={0} />
+        <StatTile label="Σ actual pts" value={d.totals.sum_actual} decimals={0} accent />
+        <StatTile label="Realised" value={realised} decimals={0} suffix="%" sub="actual ÷ predicted" />
+      </div>
+      <Card title="Predicted XI xP vs actual points" right={<Eyebrow>per gameweek</Eyebrow>}>
+        <BarChart height={320} data={d.gws.map((g) => ({ gw: g.gw, pred: g.predicted_xi_xp, actual: g.actual_points }))} xKey="gw"
+          series={[{ key: "pred", label: "Predicted XI xP", color: "var(--s2)" }, { key: "actual", label: "Actual points", color: "var(--s0)" }]} xFormat={(v) => String(v)} />
       </Card>
     </div>
   );
 }
 
-function AccuracyChart({ data }: { data: Accuracy }) {
+// ---------------- Weights ----------------
+function WeightsTab({ season }: { season: string }) {
+  const hw = useQuery({ queryKey: ["hedge-weights", season], queryFn: () => api.hedgeWeights(season), enabled: !!season, retry: false, staleTime: Infinity });
   return (
-    <div className="h-72">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data.per_gw} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-          <XAxis dataKey="gw" tick={chartTick} />
-          <YAxis yAxisId="ic" domain={[0, 1]} tick={chartTick} width={36} />
-          <YAxis yAxisId="err" orientation="right" tick={chartTick} width={36} />
-          <Tooltip contentStyle={tooltipStyle} />
-          <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Line yAxisId="ic" type="monotone" dataKey="ic" name="Rank IC" stroke={PALETTE[0]} strokeWidth={2} dot={{ r: 2 }} />
-          <Line yAxisId="err" type="monotone" dataKey="rmse" name="RMSE" stroke={PALETTE[3]} strokeWidth={2} dot={{ r: 2 }} />
-          <Line yAxisId="err" type="monotone" dataKey="mae" name="MAE" stroke={PALETTE[1]} strokeWidth={2} dot={{ r: 2 }} />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function CalibrationChart({ data }: { data: Accuracy }) {
-  return (
-    <div className="h-72">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data.calibration} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-          <XAxis dataKey="bucket" tick={chartTick} />
-          <YAxis tick={chartTick} />
-          <Tooltip contentStyle={tooltipStyle} />
-          <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Bar dataKey="mean_pred" name="Mean predicted" fill={PALETTE[0]} radius={[3, 3, 0, 0]} />
-          <Bar dataKey="mean_actual" name="Mean actual" fill={PALETTE[2]} radius={[3, 3, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function OptimalXiView({ data }: { data: OptimalXi }) {
-  const t = data.totals!;
-  const hitRate = t.sum_predicted ? (t.sum_actual / t.sum_predicted) * 100 : 0;
-  return (
-    <div className="grid gap-3">
-      <div className="grid grid-cols-3 gap-3">
-        <Kpi label="Σ predicted xP" value={t.sum_predicted.toFixed(1)} />
-        <Kpi label="Σ actual pts" value={t.sum_actual.toFixed(0)} />
-        <Kpi label="Realised %" value={`${hitRate.toFixed(0)}%`} />
-      </div>
-      <div className="h-72">
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={data.gws} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-            <XAxis dataKey="gw" tick={chartTick} />
-            <YAxis tick={chartTick} />
-            <Tooltip contentStyle={tooltipStyle} />
-            <Legend wrapperStyle={{ fontSize: 12 }} />
-            <Bar dataKey="predicted_xi_xp" name="Predicted XI xP" fill={PALETTE[0]} radius={[3, 3, 0, 0]} />
-            <Bar dataKey="actual_points" name="Actual points" fill={PALETTE[1]} radius={[3, 3, 0, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-      <Table
-        head={["GW", "Pred XI xP", "Actual", "Captain", "C pred", "C actual"]}
-        rows={data.gws.map((g) => [g.gw, g.predicted_xi_xp.toFixed(1), g.actual_points.toFixed(0), g.captain ?? "—", g.captain_pred.toFixed(1), g.captain_actual.toFixed(0)])}
-      />
-    </div>
-  );
-}
-
-// ---- Online-Hedge member weight adaptation across a season ----
-function Weights({ season }: { season: string }) {
-  const { data, isLoading, error, isFetching } = useQuery({
-    queryKey: ["hedge-weights", season],
-    queryFn: () => api.hedgeWeights(season),
-    enabled: !!season,
-    retry: false,
-    staleTime: Infinity,
-  });
-  return (
-    <Card title={`Online-Hedge weight adaptation — ${season || "?"}`}>
-      <p className="mb-3 text-sm text-muted-fg">
-        How the adaptive ensemble re-weights its members as the season unfolds (leakage-safe: each GW’s
-        weights use only earlier results). First load replays the season and can take ~20s.
+    <Card title="Online-Hedge member weights" right={<span style={{ color: "var(--fg-faint)" }}><Info size={14} /></span>}>
+      <p style={{ margin: "0 0 14px", fontSize: 13, color: "var(--fg-dim)", lineHeight: 1.5 }}>
+        The ensemble continuously re-weights its component predictors as the season unfolds — heavier weight to whatever forecasts best, strictly causally. First load replays the season (~20s).
       </p>
-      {(isLoading || isFetching) && <Loading />}
-      {error && <ErrorBox message={String(error)} />}
-      {data && !isFetching && (data.series.length === 0
-        ? <Hint>No feature panel for {season}.</Hint>
-        : <WeightsChart data={data} />)}
+      {(hw.isLoading || hw.isFetching) && <Spinner label="Replaying season…" />}
+      {hw.error && <ErrorBox message={String(hw.error)} />}
+      {hw.data && !hw.isFetching && <WeightsChart data={hw.data} />}
     </Card>
   );
 }
-
 function WeightsChart({ data }: { data: HedgeWeights }) {
-  const rows = data.series.map((s) => ({ gw: s.gw, ...s.weights }));
-  return (
-    <>
-      {data.train_season && <p className="mb-2 text-xs text-muted-fg">Seeded from {data.train_season} IC.</p>}
-      <div className="h-96">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-            <XAxis dataKey="gw" tick={chartTick} />
-            <YAxis domain={[0, "auto"]} tick={chartTick} />
-            <Tooltip contentStyle={tooltipStyle} />
-            <Legend wrapperStyle={{ fontSize: 12 }} />
-            {data.members.map((m, i) => (
-              <Line key={m} type="monotone" dataKey={m} stroke={PALETTE[i % PALETTE.length]} dot={false} strokeWidth={2} />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-    </>
-  );
+  if (!data.series.length) return <Hint>No feature panel for {data.eval_season}.</Hint>;
+  const rows: Record<string, number>[] = data.series.map((s) => ({ gw: s.gw, ...s.weights }));
+  return <LineChart height={360} data={rows} xKey="gw" xFormat={(v) => "GW" + v}
+    series={data.members.map((m, i) => ({ key: m, label: m, color: SERIES[i % 6] }))} yDomain={[0, Math.max(...rows.flatMap((r) => data.members.map((m) => r[m] || 0))) * 1.1]} yFormat={(v) => v.toFixed(2)} />;
 }
 
-// ---- Player search with per-model xP + history sparkline ----
-function Players({ season }: { season: string }) {
+// ---------------- Players ----------------
+function PlayersTab({ season }: { season: string }) {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState<PlayerSearchResult | null>(null);
-  const search = useQuery({
-    queryKey: ["search", q],
-    queryFn: () => api.searchPlayers(q),
-    enabled: q.length >= 2,
-    retry: false,
-  });
-  const history = useQuery({
-    queryKey: ["history", sel?.element_id, season],
-    queryFn: () => api.playerHistory(sel!.element_id, season),
-    enabled: !!sel && !!season,
-    retry: false,
-  });
-
+  const search = useQuery({ queryKey: ["search", q], queryFn: () => api.searchPlayers(q), enabled: q.length >= 2, retry: false });
+  const hist = useQuery({ queryKey: ["history", sel?.element_id, season], queryFn: () => api.playerHistory(sel!.element_id, season), enabled: !!sel && !!season, retry: false });
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <Card title="Search">
-        <div className="relative mb-3">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-muted-fg" />
-          <TextInput className="pl-8" placeholder="Type a player name…" value={q} onChange={(e) => setQ(e.target.value)} />
+    <div className="cmp-grid" style={{ display: "grid", gap: "var(--gap)", gridTemplateColumns: "minmax(0,1fr) minmax(300px,0.85fr)", alignItems: "start" }}>
+      <Card title="Search players">
+        <div style={{ position: "relative", marginBottom: 12 }}>
+          <Search size={16} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "var(--fg-faint)", zIndex: 1 }} />
+          <TextInput style={{ paddingLeft: 34 }} placeholder="Name or club…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
-        {search.isFetching && <Loading />}
-        {search.data && (
-          <ul className="grid gap-1">
-            {search.data.players.map((p) => (
-              <li key={p.element_id}>
-                <button
-                  onClick={() => setSel(p)}
-                  className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition duration-150 hover:bg-muted ${sel?.element_id === p.element_id ? "bg-muted ring-1 ring-primary/40" : ""}`}
-                >
-                  <PlayerAvatar code={p.code} position={p.position} size={32} />
-                  <span className="font-medium text-fg">{p.name}</span>
-                  <span className="text-xs text-muted-fg">{p.team} · {p.position} · £{p.price.toFixed(1)}</span>
-                  <span className="tnum ml-auto text-xs text-muted-fg">
-                    {Object.entries(p.predictions).map(([v, d]) => `${v}: ${fmt(d.xp_next1)}`).join("  ")}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
+        {search.isFetching && <Spinner />}
+        <div style={{ display: "grid", gap: 4, maxHeight: 480, overflowY: "auto" }}>
+          {search.data?.players.map((p) => {
+            const xp = Object.values(p.predictions)[0]?.xp_next1;
+            return (
+              <button key={p.element_id} onClick={() => setSel(p)} className="tx"
+                style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 11, textAlign: "left", padding: "8px 9px", borderRadius: 10, cursor: "pointer", border: "1px solid " + (sel?.element_id === p.element_id ? "var(--accent)" : "transparent"), background: sel?.element_id === p.element_id ? "var(--accent-faint)" : "var(--surface-2)" }}>
+                <PlayerAvatar player={{ name: p.name, team: p.team, position: p.position, code: p.code }} size={34} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+                  <div style={{ fontSize: 11, color: "var(--fg-faint)", display: "flex", gap: 6, alignItems: "center" }}><TeamBadge code={p.team} size={15} /> {p.position} · £{p.price.toFixed(1)}</div>
+                </div>
+                <div className="num display" style={{ fontSize: 16, color: "var(--accent)", width: 40, textAlign: "right" }}>{xp != null ? xp.toFixed(1) : "—"}</div>
+              </button>
+            );
+          })}
+          {search.data && search.data.players.length === 0 && <Hint>No players match “{q}”.</Hint>}
+          {q.length < 2 && <Hint>Type at least two letters to search.</Hint>}
+        </div>
       </Card>
-      <Card title={sel ? `${sel.name} — ${season || "?"}` : "Player detail"}>
-        {!sel && <Hint>Select a player to see per-model xP and gameweek history.</Hint>}
-        {sel && (
-          <div className="grid gap-3">
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-              <PlayerAvatar code={sel.code} position={sel.position} size={56} />
-              {Object.entries(sel.predictions).map(([v, d]) => (
-                <Stat key={v} label={`${v} xP (GW${d.gw})`} value={fmt(d.xp_next1)} />
-              ))}
-            </div>
-            {history.isLoading && <Loading />}
-            {history.error && <Hint>No {season} history for this player.</Hint>}
-            {history.data && history.data.history.length > 0 && (
-              <div className="h-56">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={history.data.history} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-                    <XAxis dataKey="gw" tick={chartTick} />
-                    <YAxis tick={chartTick} />
-                    <Tooltip contentStyle={tooltipStyle} />
-                    <Line type="monotone" dataKey="points" stroke={PALETTE[0]} strokeWidth={2} dot={{ r: 2 }} />
-                  </LineChart>
-                </ResponsiveContainer>
+      {sel
+        ? <Card title={`${sel.name} — ${season}`} pad={false}>
+            <div className="card-b">
+              <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+                <PlayerAvatar player={{ name: sel.name, team: sel.team, position: sel.position, code: sel.code }} size={56} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 19, fontWeight: 800 }}>{sel.full_name || sel.name}</div>
+                  <div style={{ fontSize: 12.5, color: "var(--fg-dim)", display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}><TeamBadge code={sel.team} size={18} /> {sel.position} · £{sel.price.toFixed(1)}</div>
+                </div>
               </div>
-            )}
-          </div>
-        )}
-      </Card>
+              <div className="eyebrow" style={{ marginBottom: 6 }}>Per-model xP</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 16 }}>
+                {Object.entries(sel.predictions).map(([v, d]) => (
+                  <div key={v} style={{ background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: 9, padding: "9px 12px" }}>
+                    <div className="eyebrow">{v} · GW{d.gw}</div>
+                    <div className="display num" style={{ fontSize: 19, color: "var(--accent)" }}>{d.xp_next1?.toFixed(1) ?? "—"}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="eyebrow" style={{ marginBottom: 6 }}>Gameweek returns</div>
+              {hist.isLoading && <Spinner />}
+              {hist.data && hist.data.history.length > 0
+                ? <div style={{ background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: 10, padding: "10px 12px" }}>
+                    <BarChart height={140} data={hist.data.history.map((h) => ({ gw: h.gw, pts: h.points }))} xKey="gw" series={[{ key: "pts", label: "Points", color: "var(--accent)" }]} legend={false} />
+                  </div>
+                : <Hint>No {season} history.</Hint>}
+            </div>
+          </Card>
+        : <Card title="Player detail"><div style={{ display: "grid", placeItems: "center", minHeight: 280, gap: 10, color: "var(--fg-faint)", textAlign: "center" }}><Search size={32} /><p style={{ margin: 0, fontSize: 13, maxWidth: 220 }}>Select a player to see their per-model xP and gameweek returns.</p></div></Card>}
     </div>
   );
 }
 
-// ---- helpers & shared bits ----
-function aggregateByTeam(players: PlayerPrediction[]) {
-  const m = new Map<string, { team: string; n: number; sum: number }>();
-  for (const p of players) {
-    const team = p.team ?? "—";
-    const e = m.get(team) ?? { team, n: 0, sum: 0 };
-    e.n += 1;
-    e.sum += p.xp_next1 ?? 0;
-    m.set(team, e);
-  }
-  return [...m.values()].map((e) => ({ ...e, mean: e.n ? e.sum / e.n : 0 })).sort((a, b) => b.sum - a.sum);
-}
-
-function uniq<T>(xs: T[] | undefined): T[] {
-  return [...new Set(xs ?? [])];
-}
-function fmt(v: number | null | undefined, d = 2): string {
-  return v == null ? "—" : v.toFixed(d);
-}
-
-const chartTick = { fontSize: 11, fill: "var(--color-muted-foreground)" };
-const tooltipStyle = { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 12, color: "var(--color-foreground)" };
-
-function Kpi({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="rounded-card border border-border bg-surface p-3">
-      <div className="text-[11px] uppercase tracking-wide text-muted-fg">{label}</div>
-      <div className="tnum mt-0.5 text-lg font-semibold text-fg">{value}</div>
-    </div>
-  );
-}
-function Stat({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <span className="grid">
-      <span className="text-[11px] uppercase tracking-wide text-muted-fg">{label}</span>
-      <span className="tnum font-medium text-fg">{value ?? "—"}</span>
-    </span>
-  );
-}
-function Table({ head, rows }: { head: string[]; rows: (string | number)[][] }) {
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-sm">
-        <thead>
-          <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-fg">
-            {head.map((h) => <th key={h} className="px-2 py-1.5 font-medium">{h}</th>)}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i} className="border-b border-border last:border-0 hover:bg-muted">
-              {r.map((c, j) => <td key={j} className={`px-2 py-1.5 ${j === 0 ? "text-fg" : "tnum text-muted-fg"}`}>{c}</td>)}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-const Loading = Spinner;
-function Hint({ children }: { children: React.ReactNode }) {
-  return <p className="text-sm text-muted-fg">{children}</p>;
-}
+function uniq<T>(xs: T[] | undefined): T[] { return [...new Set(xs ?? [])]; }

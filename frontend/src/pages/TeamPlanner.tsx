@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowRightLeft, Check, Crown, Download, Sparkles } from "lucide-react";
-import { PageHeader, Card } from "../components/Layout";
+import { ArrowRightLeft, Check, Crown, Download, Info, Shield, Sparkles } from "lucide-react";
 import Pitch, { type PitchPlayer } from "../components/Pitch";
-import { Button, Mini, Spinner, TextInput } from "../components/ui";
+import { BarChart } from "../components/charts";
+import PlayerAvatar, { TeamBadge } from "../components/PlayerAvatar";
+import { Button, Card, CountUp, Hint, Mini, Segmented, Spinner, TextInput } from "../components/ui";
 import { api, type PlannerResult, type Squad, type TrackedDetail } from "../lib/api";
 
 export default function TeamPlanner() {
@@ -11,8 +12,6 @@ export default function TeamPlanner() {
   const [entry, setEntry] = useState("");
   const [season, setSeason] = useState("");
   const [gw, setGw] = useState(1);
-
-  // Prefill from saved settings once they load.
   useEffect(() => {
     const g = settings.data?.general;
     if (!g) return;
@@ -21,214 +20,337 @@ export default function TeamPlanner() {
   }, [settings.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const entryId = entry === "" ? null : Number(entry);
+  const version = settings.data?.general.active_model ?? "v1";
+
+  return (
+    <div className="fade-up" style={{ display: "grid", gap: "var(--gap)" }}>
+      <Controls entry={entry} season={season} gw={gw} onEntry={setEntry} onSeason={setSeason} onGw={setGw} />
+      {entryId != null && season
+        ? <Loaded entryId={entryId} season={season} gw={gw} version={version} />
+        : <Card><Hint>Enter an entry id and season above (or set them in Settings) to load your team, captain pick, transfer and chip plan.</Hint></Card>}
+    </div>
+  );
+}
+
+function Controls(props: { entry: string; season: string; gw: number; onEntry: (v: string) => void; onSeason: (v: string) => void; onGw: (v: number) => void }) {
+  const track = useMutation({ mutationFn: (id: number) => api.trackEntry(id) });
+  return (
+    <Card>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
+        <Mini label="Entry id"><div style={{ width: 120 }}><TextInput inputMode="numeric" value={props.entry} onChange={(e) => props.onEntry(e.target.value)} /></div></Mini>
+        <Mini label="Season"><div style={{ width: 110 }}><TextInput placeholder="2024-25" value={props.season} onChange={(e) => props.onSeason(e.target.value)} /></div></Mini>
+        <Mini label="GW"><div style={{ width: 72 }}><TextInput type="number" min={1} max={38} value={props.gw} onChange={(e) => props.onGw(Number(e.target.value))} /></div></Mini>
+        <Button variant="pri" loading={track.isPending} icon={track.isSuccess ? <Check size={15} /> : <Download size={15} />}
+          disabled={props.entry === ""} onClick={() => track.mutate(Number(props.entry))}>
+          {track.isSuccess ? "Tracked" : "Track team"}
+        </Button>
+        {track.isError && <span style={{ fontSize: 12, color: "var(--bad)" }}>{String(track.error)}</span>}
+      </div>
+    </Card>
+  );
+}
+
+function Loaded({ entryId, season, gw, version }: { entryId: number; season: string; gw: number; version: string }) {
+  const tracked = useQuery({ queryKey: ["track", entryId], queryFn: () => api.trackedEntry(entryId), retry: false });
+  const squad = useQuery({ queryKey: ["squad", season, gw, version], queryFn: () => api.squad(season, gw, version), retry: false });
+  const preds = useQuery({ queryKey: ["predictions", season, gw, version], queryFn: () => api.predictions(season, gw, version, undefined, 1000), retry: false });
+  const planner = useQuery({ queryKey: ["planner", entryId, season, gw], queryFn: () => api.planner(entryId, season, gw, { horizon: 6 }), retry: false });
+
+  const [view, setView] = useState<"team" | "model">("team");
+  const [capId, setCapId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
+
+  const xpById = useMemo(() => {
+    const m = new Map<number, number>();
+    preds.data?.players.forEach((p) => m.set(p.element_id, p.xp_next1 ?? 0));
+    return m;
+  }, [preds.data]);
+
+  if (tracked.isLoading) return <Spinner label="Loading your team…" />;
+
+  // Build pitch players for the active view.
+  const teamPitch = tracked.data ? splitTracked(tracked.data, xpById, capId) : null;
+  const modelPitch = squad.data ? splitSquad(squad.data) : null;
+  const shown = view === "team" ? teamPitch : modelPitch;
+
+  const xiProj = shown ? shown.starters.reduce((s, p) => s + (parseFloat(p.meta || "0") || 0), 0) : 0;
 
   return (
     <>
-      <PageHeader
-        title="Team Planner"
-        subtitle="Enter your entry id; get model suggestions, transfer + chip planning, and expected points."
-        actions={
-          <ControlBar
-            entry={entry}
-            season={season}
-            gw={gw}
-            onEntry={setEntry}
-            onSeason={setSeason}
-            onGw={setGw}
-          />
-        }
-      />
-      <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr]">
-        <div className="grid gap-4">
-          {entryId != null && <TrackedTeam entryId={entryId} />}
-          {season && <ModelSquad season={season} gw={gw} version={settings.data?.general.active_model ?? "v1"} />}
-        </div>
-        <div className="grid gap-4">
-          {entryId != null && season ? (
-            <PlannerPanel entry={entryId} season={season} gw={gw} horizon={settings.data?.general.horizon ?? 6} />
-          ) : (
-            <Card title="Recommendations">
-              <p className="text-sm text-muted-fg">Enter an entry id and season to see transfer, captaincy and chip planning.</p>
-            </Card>
-          )}
+      {tracked.data && <TeamHeader d={tracked.data} season={season} xiProj={view === "team" ? xiProj : (squad.data?.xi_xp ?? 0)} />}
+      <div className="planner-grid" style={{ display: "grid", gap: "var(--gap)", gridTemplateColumns: "minmax(0,1.55fr) minmax(320px,1fr)", alignItems: "start" }}>
+        <Card pad={false}>
+          <div className="card-h">
+            <h2>{view === "team" ? "Your XI" : "Model-optimal XI"}</h2>
+            <div style={{ marginLeft: "auto" }}>
+              <Segmented value={view} onChange={(v) => setView(v as "team" | "model")} options={[{ value: "team", label: "Your team" }, { value: "model", label: "Model XI" }]} />
+            </div>
+          </div>
+          <div className="card-b">
+            {!shown && <Hint>{view === "team" ? "Track this entry to see your XI." : `No model squad for ${season} GW${gw}.`}</Hint>}
+            {shown && (
+              <>
+                <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 14 }}>
+                  <HeadStat label="Projected XI" big accent>{(view === "team" ? xiProj : (squad.data?.xi_xp ?? 0)).toFixed(1)}</HeadStat>
+                  <HeadStat label="Formation">{formationOf(shown.starters)}</HeadStat>
+                  {view === "model" && squad.data && <HeadStat label="XI cost">£{squad.data.total_cost.toFixed(1)}m</HeadStat>}
+                  {view === "team" && tracked.data && <HeadStat label="Squad value">£{tracked.data.team_value.toFixed(1)}m</HeadStat>}
+                  {view === "team" && tracked.data && <HeadStat label="In the bank">£{tracked.data.bank.toFixed(1)}m</HeadStat>}
+                </div>
+                <Pitch starters={shown.starters} bench={shown.bench} selected={selected ?? undefined} onSelect={setSelected} />
+                <p style={{ margin: "12px 2px 0", fontSize: 12, color: "var(--fg-faint)", display: "flex", alignItems: "center", gap: 6 }}>
+                  <Info size={13} /> Tap a player for their breakdown · the captain’s points are doubled.
+                </p>
+              </>
+            )}
+          </div>
+        </Card>
+
+        <div style={{ display: "grid", gap: "var(--gap)" }}>
+          {selected != null
+            ? <PlayerDetail elementId={selected} season={season} preds={preds.data?.players ?? []} onClose={() => setSelected(null)} />
+            : (
+              <>
+                <CaptainCard starters={tracked.data} preds={preds.data?.players ?? []} capId={capId} setCapId={setCapId} />
+                <TransferCard planner={planner.data} loading={planner.isLoading} error={planner.error ? String(planner.error) : null} />
+                <ChipCard rec={planner.data} />
+              </>
+            )}
         </div>
       </div>
     </>
   );
 }
 
-function ControlBar(props: {
-  entry: string; season: string; gw: number;
-  onEntry: (v: string) => void; onSeason: (v: string) => void; onGw: (v: number) => void;
-}) {
-  const track = useMutation({ mutationFn: (id: number) => api.trackEntry(id) });
+// ---------- header ----------
+function TeamHeader({ d, season, xiProj }: { d: TrackedDetail; season: string; xiProj: number }) {
   return (
-    <div className="flex flex-wrap items-end gap-2">
-      <Mini label="Entry id">
-        <TextInput style={{ width: 110 }} inputMode="numeric" value={props.entry} onChange={(e) => props.onEntry(e.target.value)} />
-      </Mini>
-      <Mini label="Season">
-        <TextInput style={{ width: 100 }} placeholder="2024-25" value={props.season} onChange={(e) => props.onSeason(e.target.value)} />
-      </Mini>
-      <Mini label="GW">
-        <TextInput style={{ width: 64 }} type="number" min={1} max={38} value={props.gw} onChange={(e) => props.onGw(Number(e.target.value))} />
-      </Mini>
-      <Button
-        loading={track.isPending}
-        done={track.isSuccess}
-        icon={track.isSuccess ? <Check className="h-4 w-4" /> : <Download className="h-4 w-4" />}
-        disabled={props.entry === ""}
-        onClick={() => track.mutate(Number(props.entry))}
-        title="Pull the latest roster + prices from FPL and save for daily tracking"
-      >
-        {track.isSuccess ? "Tracked" : "Track"}
-      </Button>
-      {track.isError && <span className="text-xs text-destructive">{String(track.error)}</span>}
-    </div>
-  );
-}
-
-function TrackedTeam({ entryId }: { entryId: number }) {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["track", entryId],
-    queryFn: () => api.trackedEntry(entryId),
-    retry: false,
-  });
-  if (isLoading) return <Card title="Your team"><Loading /></Card>;
-  if (error) return <Card title="Your team"><Hint>Not tracked yet — press “Track” to pull this entry’s squad.</Hint></Card>;
-  if (!data) return null;
-  const { starters, bench } = splitTracked(data);
-  return (
-    <Card title={`Your team — ${data.name ?? entryId} (GW${data.current_event ?? "?"})`}>
-      <div className="mb-3 flex flex-wrap gap-x-6 gap-y-1 text-sm">
-        <Stat label="Total pts" value={data.total_points} />
-        <Stat label="Rank" value={data.overall_rank?.toLocaleString()} />
-        <Stat label="Squad value" value={`£${data.team_value.toFixed(1)}m`} />
-        <Stat label="Bank" value={`£${data.bank.toFixed(1)}m`} />
-      </div>
-      <Pitch starters={starters} bench={bench} />
-    </Card>
-  );
-}
-
-function ModelSquad({ season, gw, version }: { season: string; gw: number; version: string }) {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["squad", season, gw, version],
-    queryFn: () => api.squad(season, gw, version),
-    retry: false,
-  });
-  return (
-    <Card title="Model-suggested XI">
-      {isLoading && <Loading />}
-      {error && <Hint>No model squad for {season} GW{gw}.</Hint>}
-      {data && (
-        <>
-          <div className="mb-3 flex flex-wrap gap-x-6 gap-y-1 text-sm">
-            <Stat label="XI xP" value={data.xi_xp.toFixed(1)} />
-            <Stat label="Cost" value={`£${data.total_cost.toFixed(1)}m`} />
-            <Stat label="Formation" value={Object.entries(data.formation).filter(([k]) => k !== "GK").map(([, v]) => v).join("-")} />
+    <Card pad={false}>
+      <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", padding: "calc(16px*var(--dens)) var(--pad)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+          <div style={{ width: 46, height: 46, borderRadius: 12, background: "var(--accent)", color: "var(--accent-ink)", display: "grid", placeItems: "center", boxShadow: "0 10px 26px -10px var(--accent-glow)" }}><Shield size={24} /></div>
+          <div>
+            <div style={{ fontSize: "clamp(18px,2.4vw,23px)", fontWeight: 800, letterSpacing: "-0.02em", lineHeight: 1 }}>{d.name ?? `Entry ${d.entry_id}`}</div>
+            <div style={{ fontSize: 12.5, color: "var(--fg-dim)", marginTop: 3 }}>Gameweek {d.current_event ?? "?"} · {season} · entry {d.entry_id}</div>
           </div>
-          <Pitch {...splitSquad(data)} />
-        </>
-      )}
-    </Card>
-  );
-}
-
-function PlannerPanel({ entry, season, gw, horizon }: { entry: number; season: string; gw: number; horizon: number }) {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["planner", entry, season, gw, horizon],
-    queryFn: () => api.planner(entry, season, gw, { horizon }),
-    retry: false,
-  });
-  return (
-    <Card title="Recommendations">
-      {isLoading && <Loading />}
-      {error && <Hint>{String(error).includes("404") ? "Track this entry first to plan transfers." : String(error)}</Hint>}
-      {data && <PlannerBody data={data} />}
-    </Card>
-  );
-}
-
-function PlannerBody({ data }: { data: PlannerResult }) {
-  const r = data.rationale;
-  return (
-    <div className="grid gap-4 text-sm">
-      <div className="flex flex-wrap gap-x-6 gap-y-1">
-        <Stat label="Kind" value={data.kind} />
-        <Stat label="EV uplift" value={data.ev_uplift != null ? `${data.ev_uplift.toFixed(2)} pts` : "—"} />
-        <Stat label="Confidence" value={data.confidence != null ? `${(data.confidence * 100).toFixed(0)}%` : "—"} />
-        <Stat label="Horizon" value={`${r.horizon} GW`} />
-      </div>
-
-      <div className="flex items-center gap-2 rounded-md border border-border bg-bg px-3 py-2">
-        <Crown className="h-4 w-4 text-accent" />
-        <span className="font-medium text-fg">Captain:</span>
-        <span>{r.captain.name}</span>
-        <span className="tnum ml-auto text-muted-fg">{r.captain.xp_next.toFixed(2)} xP</span>
-      </div>
-
-      <div>
-        <div className="mb-1 flex items-center gap-2 font-medium text-fg">
-          <ArrowRightLeft className="h-4 w-4 text-primary" /> Transfers{r.gw0_hit ? ` (−${r.gw0_hit * 4} hit)` : ""}
         </div>
-        {r.transfers_in.length === 0 ? (
-          <p className="text-muted-fg">No transfer — hold is optimal.</p>
-        ) : (
-          <ul className="grid gap-1">
-            {r.transfers_in.map((tin, i) => (
-              <li key={tin.id} className="flex items-center gap-2">
-                <span className="text-destructive">{r.transfers_out[i]?.name ?? "—"}</span>
-                <ArrowRightLeft className="h-3 w-3 text-muted-fg" />
-                <span className="text-positive">{tin.name}</span>
-                <span className="tnum ml-auto text-muted-fg">{tin.xp_next.toFixed(2)} xP</span>
-              </li>
-            ))}
-          </ul>
-        )}
+        <div style={{ marginLeft: "auto", display: "flex", gap: "clamp(14px,2.4vw,34px)", flexWrap: "wrap" }}>
+          <HeadStat label="Total points">{d.total_points != null ? <CountUp value={d.total_points} /> : "—"}</HeadStat>
+          <HeadStat label="Overall rank">{d.overall_rank != null ? <CountUp value={d.overall_rank} /> : "—"}</HeadStat>
+          <HeadStat label="Squad value">£{d.team_value.toFixed(1)}m</HeadStat>
+          <HeadStat label="Live XI proj." accent>{xiProj.toFixed(1)}</HeadStat>
+        </div>
       </div>
+    </Card>
+  );
+}
 
-      <div className="flex items-center gap-2 text-muted-fg">
-        <Sparkles className="h-4 w-4" />
-        <span>Plan net xP {r.plan_net_xp.toFixed(1)}{r.hold_net_xp != null ? ` vs hold ${r.hold_net_xp.toFixed(1)}` : ""}.</span>
-      </div>
+function HeadStat({ label, children, accent, big }: { label: string; children: React.ReactNode; accent?: boolean; big?: boolean }) {
+  return (
+    <div style={{ minWidth: 78 }}>
+      <div className="eyebrow" style={{ marginBottom: 5 }}>{label}</div>
+      <div className="display num" style={{ fontSize: big ? "clamp(24px,3vw,32px)" : "clamp(18px,2.2vw,24px)", color: accent ? "var(--accent)" : "var(--fg)" }}>{children}</div>
     </div>
   );
 }
 
-// ---- helpers ----
-function splitTracked(d: TrackedDetail): { starters: PitchPlayer[]; bench: PitchPlayer[] } {
-  const map = (p: TrackedDetail["picks"][number]): PitchPlayer => ({
-    id: p.element_id, name: p.name ?? String(p.element_id), position: p.position,
-    code: p.code, captain: p.captain, vice: p.vice,
-  });
-  const starters = d.picks.filter((p) => (p.slot ?? 99) <= 11).map(map);
-  const bench = d.picks.filter((p) => (p.slot ?? 0) > 11).map(map);
-  return { starters, bench };
+// ---------- captain ----------
+function CaptainCard({ starters, preds, capId, setCapId }: {
+  starters: TrackedDetail | undefined; preds: { element_id: number; name: string; team: string | null; code: number | null; position: string | null; xp_next1: number | null }[];
+  capId: number | null; setCapId: (id: number) => void;
+}) {
+  const xp = (id: number) => preds.find((p) => p.element_id === id)?.xp_next1 ?? 0;
+  const meta = (id: number) => preds.find((p) => p.element_id === id);
+  // candidates: your starters by xP (fallback to top predictions if no roster).
+  const ids = starters ? starters.picks.filter((p) => (p.slot ?? 99) <= 11).map((p) => p.element_id) : preds.slice(0, 6).map((p) => p.element_id);
+  const cands = [...ids].sort((a, b) => xp(b) - xp(a)).slice(0, 5);
+  const pickId = capId ?? starters?.picks.find((p) => p.captain)?.element_id ?? cands[0];
+  if (!pickId) return <Card title="Captain"><Hint>No prediction data for this gameweek yet.</Hint></Card>;
+  const pm = meta(pickId);
+  const ceil = Math.max(...cands.map((id) => xp(id) * 2.4), 1);
+  return (
+    <Card title="Captain" right={<span className="tag tag-good"><Crown size={12} /> Pick</span>}>
+      <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 14 }}>
+        <div style={{ position: "relative" }}>
+          <PlayerAvatar player={{ name: pm?.name ?? "", team: pm?.team, position: pm?.position, code: pm?.code }} size={56} />
+          <span style={{ position: "absolute", right: -4, bottom: -4, width: 22, height: 22, borderRadius: 999, background: "var(--accent)", color: "var(--accent-ink)", fontWeight: 800, fontSize: 12, display: "grid", placeItems: "center", border: "2px solid var(--surface)" }}>C</span>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>{pm?.name}</div>
+          <div style={{ fontSize: 12.5, color: "var(--fg-dim)", display: "flex", alignItems: "center", gap: 7 }}><TeamBadge code={pm?.team} size={18} /> {pm?.position}</div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div className="display" style={{ fontSize: 30, color: "var(--accent)" }}><CountUp value={xp(pickId) * 2} decimals={1} /></div>
+          <div className="eyebrow">capt. xP</div>
+        </div>
+      </div>
+      <div style={{ display: "grid", gap: 6 }}>
+        {cands.map((id) => {
+          const m = meta(id); const on = id === pickId;
+          return (
+            <button key={id} onClick={() => setCapId(id)} className="tx"
+              style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 10, textAlign: "left", padding: "8px 10px", borderRadius: 10, cursor: "pointer", border: "1px solid " + (on ? "var(--accent)" : "var(--line)"), background: on ? "var(--accent-faint)" : "var(--surface-2)" }}>
+              <PlayerAvatar player={{ name: m?.name ?? "", team: m?.team, position: m?.position, code: m?.code }} size={30} ring={false} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>{m?.name}</div>
+                <div style={{ marginTop: 3, height: 6, position: "relative" }}>
+                  <div className="mbar" style={{ position: "absolute", inset: 0 }}><i style={{ width: `${(xp(id) * 2 / ceil) * 100}%`, background: "linear-gradient(90deg, var(--line-2), var(--accent))" }} /></div>
+                </div>
+              </div>
+              <div className="num" style={{ fontWeight: 800, fontSize: 15, color: on ? "var(--accent)" : "var(--fg)", width: 34, textAlign: "right" }}>{xp(id).toFixed(1)}</div>
+            </button>
+          );
+        })}
+      </div>
+    </Card>
+  );
 }
 
-function splitSquad(s: Squad): { starters: PitchPlayer[]; bench: PitchPlayer[] } {
-  const map = (p: Squad["picks"][number]): PitchPlayer => ({
-    id: p.element_id, name: p.name, position: p.position, code: p.code,
-    captain: p.captain, vice: p.vice,
-    meta: `£${p.price.toFixed(1)} · ${p.xp.toFixed(1)}`,
-  });
+// ---------- transfer ----------
+function TransferCard({ planner, loading, error }: { planner?: PlannerResult; loading: boolean; error: string | null }) {
+  if (loading) return <Card title="Transfer"><Spinner /></Card>;
+  if (error || !planner) return <Card title="Transfer"><Hint>{error?.includes("404") ? "Track this entry first to plan transfers." : (error ?? "No recommendation available.")}</Hint></Card>;
+  const r = planner.rationale;
+  return (
+    <Card title="Transfer" right={r.uplift != null ? <span className="tag tag-good">+{r.uplift.toFixed(1)} xP / {r.horizon}gw</span> : undefined}>
+      <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+        <Meter label="EV uplift" value={planner.ev_uplift ?? 0} suffix=" pts" decimals={1} />
+        <Meter label="Confidence" value={Math.round((planner.confidence ?? 0) * 100)} suffix="%" pct={(planner.confidence ?? 0) * 100} />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <span className="tag tag-good"><Crown size={11} /> {r.captain.name}</span>
+        <span className="num" style={{ marginLeft: "auto", fontSize: 12, color: "var(--fg-dim)" }}>{r.captain.xp_next.toFixed(2)} xP</span>
+      </div>
+      {r.transfers_in.length === 0
+        ? <Hint>No transfer — hold is optimal{r.gw0_hit ? ` (−${r.gw0_hit * 4} would be a hit)` : ""}.</Hint>
+        : (
+          <div style={{ display: "grid", gap: 6 }}>
+            {r.transfers_in.map((tin, i) => (
+              <div key={tin.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, padding: "7px 10px", background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: 8 }}>
+                <span className="down">{r.transfers_out[i]?.name ?? "—"}</span>
+                <ArrowRightLeft size={13} style={{ color: "var(--fg-faint)" }} />
+                <span className="up">{tin.name}</span>
+                <span className="num" style={{ marginLeft: "auto", color: "var(--fg-dim)" }}>{tin.xp_next.toFixed(2)} xP</span>
+              </div>
+            ))}
+          </div>
+        )}
+      <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "var(--fg-dim)" }}>
+        <Sparkles size={14} style={{ color: "var(--accent)" }} />
+        Plan net xP {r.plan_net_xp.toFixed(1)}{r.hold_net_xp != null ? ` vs hold ${r.hold_net_xp.toFixed(1)}` : ""}{r.gw0_hit ? ` · −${r.gw0_hit * 4} hit` : ""}.
+      </div>
+    </Card>
+  );
+}
+function Meter({ label, value, suffix = "", decimals = 0, pct }: { label: string; value: number; suffix?: string; decimals?: number; pct?: number }) {
+  return (
+    <div style={{ flex: 1, background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: 10, padding: "9px 11px" }}>
+      <div className="eyebrow" style={{ marginBottom: 4 }}>{label}</div>
+      <div className="display" style={{ fontSize: 20, color: "var(--accent)" }}><CountUp value={value} decimals={decimals} suffix={suffix} /></div>
+      {pct != null && <div style={{ marginTop: 6 }} className="mbar"><i style={{ width: `${Math.min(100, pct)}%`, background: "var(--accent)" }} /></div>}
+    </div>
+  );
+}
+
+// ---------- chips ----------
+const CHIPS = [
+  { key: "wildcard", name: "Wildcard" }, { key: "bboost", name: "Bench Boost" },
+  { key: "tripcap", name: "Triple Captain" }, { key: "freehit", name: "Free Hit" },
+];
+function ChipCard({ rec }: { rec?: PlannerResult }) {
+  const [sel, setSel] = useState("wildcard");
+  return (
+    <Card title="Chip strategy">
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+        {CHIPS.map((c) => {
+          const on = c.key === sel;
+          return (
+            <button key={c.key} onClick={() => setSel(c.key)} className="tx" style={{ textAlign: "left", padding: "10px 11px", borderRadius: 10, cursor: "pointer", border: "1px solid " + (on ? "var(--accent)" : "var(--line)"), background: on ? "var(--accent-faint)" : "var(--surface-2)" }}>
+              <span style={{ fontWeight: 700, fontSize: 13 }}>{c.name}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 9, alignItems: "flex-start", padding: "10px 12px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--line)" }}>
+        <Sparkles size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 1 }} />
+        <p style={{ margin: 0, fontSize: 12.5, color: "var(--fg-dim)", lineHeight: 1.5 }}>
+          Chip EV &amp; optimal timing are a backend follow-up (the planner exposes transfers + captaincy today{rec ? "" : ""}). Selecting a chip will surface its recommended gameweek once the chip-optimiser is wired to the read API.
+        </p>
+      </div>
+    </Card>
+  );
+}
+
+// ---------- player detail ----------
+function PlayerDetail({ elementId, season, preds, onClose }: {
+  elementId: number; season: string;
+  preds: { element_id: number; name: string; team: string | null; code: number | null; position: string | null; xp_next1: number | null; xp_next6: number | null; pred_minutes: number | null; price: number; status: string | null }[];
+  onClose: () => void;
+}) {
+  const p = preds.find((x) => x.element_id === elementId);
+  const hist = useQuery({ queryKey: ["history", elementId, season], queryFn: () => api.playerHistory(elementId, season), retry: false });
+  if (!p) return <Card title="Player" pad={false}><div className="card-b"><Hint>No data.</Hint></div></Card>;
+  return (
+    <Card pad={false} className="fade-up">
+      <div className="card-h">
+        <Button onClick={onClose} style={{ padding: "6px 10px" }} icon={<ArrowRightLeft size={14} style={{ transform: "scaleX(-1)" }} />}>Back</Button>
+        <h2 style={{ marginLeft: 4 }}>Player</h2>
+      </div>
+      <div className="card-b">
+        <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+          <PlayerAvatar player={{ name: p.name, team: p.team, position: p.position, code: p.code }} size={62} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 21, fontWeight: 800, letterSpacing: "-0.02em" }}>{p.name}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "var(--fg-dim)", marginTop: 4 }}>
+              <TeamBadge code={p.team} size={18} /> {p.position}
+              {p.status && p.status !== "a" && <span className="tag tag-warn">{p.status === "d" ? "Doubtful" : "Out"}</span>}
+            </div>
+          </div>
+          <div style={{ textAlign: "right" }}><div className="display num" style={{ fontSize: 24 }}>£{p.price.toFixed(1)}</div></div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginBottom: 16 }}>
+          {[["xP next", p.xp_next1?.toFixed(1) ?? "—", true], ["xP 6gw", p.xp_next6?.toFixed(1) ?? "—", false], ["Pred mins", p.pred_minutes?.toFixed(0) ?? "—", false]].map(([k, v, a]) => (
+            <div key={k as string} style={{ background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: 9, padding: "9px 10px" }}>
+              <div className="eyebrow" style={{ marginBottom: 3 }}>{k}</div>
+              <div className="display num" style={{ fontSize: 19, color: a ? "var(--accent)" : "var(--fg)" }}>{v}</div>
+            </div>
+          ))}
+        </div>
+        <div className="eyebrow" style={{ marginBottom: 6 }}>Gameweek returns — {season}</div>
+        {hist.isLoading && <Spinner />}
+        {hist.data && hist.data.history.length > 0
+          ? <div style={{ background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: 10, padding: "10px 12px" }}>
+              <BarChart height={120} data={hist.data.history.map((h) => ({ gw: h.gw, pts: h.points }))} xKey="gw" series={[{ key: "pts", label: "Points", color: "var(--accent)" }]} legend={false} />
+            </div>
+          : <Hint>No {season} history for this player.</Hint>}
+      </div>
+    </Card>
+  );
+}
+
+// ---------- helpers ----------
+function formationOf(starters: PitchPlayer[]) {
+  const c: Record<string, number> = { DEF: 0, MID: 0, FWD: 0 };
+  starters.forEach((p) => { if (p.position && c[p.position] != null) c[p.position]++; });
+  return `${c.DEF}-${c.MID}-${c.FWD}`;
+}
+
+function splitTracked(d: TrackedDetail, xp: Map<number, number>, capId: number | null): { starters: PitchPlayer[]; bench: PitchPlayer[] } {
+  const map = (p: TrackedDetail["picks"][number]): PitchPlayer => {
+    const isCap = capId != null ? p.element_id === capId : p.captain;
+    const x = xp.get(p.element_id) ?? 0;
+    return { id: p.element_id, name: p.name ?? String(p.element_id), position: p.position, code: p.code, team: p.team,
+      captain: isCap, vice: capId != null ? false : p.vice, meta: (x * (isCap ? 2 : 1)).toFixed(1), hover: { x1: x } };
+  };
   return {
-    starters: s.picks.filter((p) => p.start).map(map),
-    bench: s.picks.filter((p) => !p.start).map(map),
+    starters: d.picks.filter((p) => (p.slot ?? 99) <= 11).map(map),
+    bench: d.picks.filter((p) => (p.slot ?? 0) > 11).map(map),
   };
 }
-
-function Stat({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <span className="grid">
-      <span className="text-[11px] uppercase tracking-wide text-muted-fg">{label}</span>
-      <span className="tnum font-medium text-fg">{value ?? "—"}</span>
-    </span>
-  );
-}
-
-const Loading = Spinner;
-function Hint({ children }: { children: React.ReactNode }) {
-  return <p className="text-sm text-muted-fg">{children}</p>;
+function splitSquad(s: Squad): { starters: PitchPlayer[]; bench: PitchPlayer[] } {
+  const map = (p: Squad["picks"][number]): PitchPlayer => ({
+    id: p.element_id, name: p.name, position: p.position, code: p.code, team: p.team,
+    captain: p.captain, vice: p.vice, meta: p.xp.toFixed(1), hover: { x1: p.xp, price: p.price },
+  });
+  return { starters: s.picks.filter((p) => p.start).map(map), bench: s.picks.filter((p) => !p.start).map(map) };
 }
