@@ -138,6 +138,11 @@ if [ "$PROVISION" -eq 1 ] && { [ "$DB_HOST" = "localhost" ] || [ "$DB_HOST" = "1
       $SUDO -u postgres psql -c "CREATE ROLE \"${DB_USER}\" LOGIN PASSWORD '${DB_PASS}';" >/dev/null 2>&1 \
         || warn "could not create role ${DB_USER}"
     fi
+    # Always (re)set the password + LOGIN so it matches FPL_DATABASE_URL even if
+    # the role already existed from a prior run with a different/empty password
+    # (the apt PostgreSQL cluster persists between installs).
+    $SUDO -u postgres psql -c "ALTER ROLE \"${DB_USER}\" WITH LOGIN PASSWORD '${DB_PASS}';" >/dev/null 2>&1 \
+      || warn "could not set password for role ${DB_USER}"
     for db in "$DB_NAME" "${DB_NAME}_test"; do
       if [ "$(psql_su "SELECT 1 FROM pg_database WHERE datname='${db}'")" != "1" ]; then
         # Force UTF8 via template0 — FPL data has non-ASCII names; a SQL_ASCII
