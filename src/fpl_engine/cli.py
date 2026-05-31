@@ -512,9 +512,15 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     print(f"bootstrap: {len(seasons)} seasons ({seasons[0]}..{seasons[-1]}), "
           f"{total} stages, memory-bounded (one process per stage)\n", flush=True)
 
+    # Stages that are CPU-bound and run for minutes with sparse output — call it
+    # out so a long, quiet stretch isn't mistaken for a hang.
+    slow = {"predictive study": "fits per position/target — several minutes, this is normal",
+            "freeze model": "cross-validates + freezes weights — several minutes, this is normal"}
+
     failed: list[str] = []
     for i, (name, cmd) in enumerate(stages, 1):
-        _progress_bar(i - 1, total, f"starting: {name}")
+        hint = f"  ({slow[name]})" if name in slow else ""
+        _progress_bar(i - 1, total, f"starting: {name}{hint}")
         rc = subprocess.call(cmd, env=env)          # inherit stdio -> live logs
         if rc != 0:
             failed.append(name)

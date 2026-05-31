@@ -125,12 +125,17 @@ EOF
 # otherwise use sudo -u. ($SUDO -u postgres is wrong as root — "-u" is not a
 # command — which previously left the role/db uncreated and the app unable to
 # authenticate.)
+#
+# Always cd to /tmp first: the installer's CWD is often the clone under /root
+# (mode 700), which the postgres user can't enter — that makes the shell print
+# "could not change directory" and createdb/psql fail spuriously, so the role/db
+# checks wrongly report "could not create".
 if [ "$(id -u)" -eq 0 ]; then
-  pg_run() { su -s /bin/sh postgres -c "$*"; }
+  pg_run() { (cd /tmp && su -s /bin/sh postgres -c "$*"); }
 elif [ -n "$SUDO" ]; then
-  pg_run() { $SUDO -u postgres sh -c "$*"; }
+  pg_run() { (cd /tmp && $SUDO -u postgres sh -c "$*"); }
 else
-  pg_run() { sh -c "$*"; }   # last resort: current user is the db superuser
+  pg_run() { (cd /tmp && sh -c "$*"); }   # last resort: current user is the db superuser
 fi
 
 if [ "$PROVISION" -eq 1 ] && { [ "$DB_HOST" = "localhost" ] || [ "$DB_HOST" = "127.0.0.1" ]; }; then
@@ -253,7 +258,11 @@ EOF
 write_unit deploy/lazyfpl-scheduler.service "LazyFPL scheduler (auto data + prediction refresh)" "$FPL_BIN schedule" system multi-user.target
 write_unit deploy/lazyfpl-api.service "LazyFPL app (UI + API)" "$UVICORN_BIN fpl_engine.api.app:served_app --host 0.0.0.0 --port 8000" system multi-user.target
 
-if [ "$WITH_SCHEDULER" -eq 1 ]; then
+# Install + enable the systemd services. Defined here but invoked AFTER the
+# one-time bootstrap so training isn't starved of RAM/CPU/DB by the always-on
+# API and the scheduler's hourly ingest (a real stall risk on 8GB boxes).
+enable_services() {
+  [ "$WITH_SCHEDULER" -eq 1 ] || return 0
   if command -v systemctl >/dev/null 2>&1 && [ "$CAN_ELEVATE" -eq 1 ] && systemctl >/dev/null 2>&1; then
     info "Installing & enabling system services: lazyfpl-scheduler, lazyfpl-api"
     $SUDO cp deploy/lazyfpl-scheduler.service deploy/lazyfpl-api.service /etc/systemd/system/
@@ -265,26 +274,28 @@ if [ "$WITH_SCHEDULER" -eq 1 ]; then
     warn "systemd not available — run manually: source .venv/bin/activate && fpl schedule"
     warn "(System units are in deploy/ for later: sudo cp deploy/*.service /etc/systemd/system/)"
   fi
-fi
+}
 
 # --- one-time history backfill + model training ----------------------------
-# Run as the final install step so the UI + services are already in place. The
-# app needs historical data and a trained model to be useful; this provides
-# both. It's heavy (10-30+ min) but part of the install by design — use
-# --bootstrap-bg to detach it, or --no-bootstrap to skip.
-if [ "$DO_BOOTSTRAP" -eq 1 ]; then
-  if [ "$BOOTSTRAP" = "bg" ]; then
-    info "Backfilling history + training the model in the background -> bootstrap.log"
-    nohup "$REPO_DIR/.venv/bin/fpl" bootstrap >>"$REPO_DIR/bootstrap.log" 2>&1 &
-    info "Running detached (10-30+ min). Watch it: tail -f $REPO_DIR/bootstrap.log"
-  else
-    info "Backfilling all seasons + training the model (one-time, 10-30+ min)…"
-    fpl bootstrap | tee -a "$REPO_DIR/bootstrap.log" || warn "bootstrap reported errors — see bootstrap.log; you can re-run: fpl bootstrap"
-    # If services are already running, restart the API so it picks up the model.
-    if [ "$WITH_SCHEDULER" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
-      $SUDO systemctl restart lazyfpl-api 2>/dev/null || true
-    fi
-  fi
+# The app needs historical data and a trained model to be useful. It's heavy
+# (10-30+ min) so we run it BEFORE starting the services: on small (8GB) hosts
+# the always-on API plus the scheduler's hourly ingest otherwise contend for
+# RAM/CPU/DB and make training crawl — which looks like a hang. Foreground
+# bootstrap → then services (so the API serves a trained model immediately).
+# --bootstrap-bg explicitly opts into a detached run alongside the services.
+if [ "$DO_BOOTSTRAP" -eq 1 ] && [ "$BOOTSTRAP" != "bg" ]; then
+  info "Backfilling all seasons + training the model (one-time, 10-30+ min; runs alone before services start)…"
+  fpl bootstrap | tee -a "$REPO_DIR/bootstrap.log" || warn "bootstrap reported errors — see bootstrap.log; you can re-run: fpl bootstrap"
+fi
+
+enable_services
+
+if [ "$DO_BOOTSTRAP" -eq 1 ] && [ "$BOOTSTRAP" = "bg" ]; then
+  info "Backfilling history + training the model in the background -> bootstrap.log"
+  nohup "$REPO_DIR/.venv/bin/fpl" bootstrap >>"$REPO_DIR/bootstrap.log" 2>&1 &
+  info "Running detached (10-30+ min). Watch it: tail -f $REPO_DIR/bootstrap.log"
+  [ "$WITH_SCHEDULER" -eq 1 ] && command -v systemctl >/dev/null 2>&1 \
+    && warn "When bootstrap.log shows completion, load the model: sudo systemctl restart lazyfpl-api"
 fi
 
 cat <<EOF
