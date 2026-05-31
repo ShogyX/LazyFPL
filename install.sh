@@ -16,6 +16,9 @@ REPO_DIR="$(pwd)"
 WITH_SCHEDULER=0
 NO_SYSTEM_DEPS=0
 BOOTSTRAP=auto      # auto = run only if no v1 model yet; on = force; off = skip
+DO_UPDATE=1         # self-update from the git remote before installing
+VERIFY=auto         # auto = run tests when an install already exists; on/off override
+REINSTALL=0         # wipe venv/node_modules/dist and rebuild from scratch
 for arg in "$@"; do
   case "$arg" in
     --with-scheduler) WITH_SCHEDULER=1 ;;
@@ -23,14 +26,22 @@ for arg in "$@"; do
     --bootstrap)      BOOTSTRAP=on ;;
     --bootstrap-bg)   BOOTSTRAP=bg ;;
     --no-bootstrap)   BOOTSTRAP=off ;;
+    --no-update)      DO_UPDATE=0 ;;
+    --verify)         VERIFY=on ;;
+    --no-verify)      VERIFY=off ;;
+    --reinstall)      REINSTALL=1 ;;
     -h|--help)
       cat <<'USAGE'
-Usage: ./install.sh [--with-scheduler] [--no-system-deps] [--bootstrap|--bootstrap-bg|--no-bootstrap]
+Usage: ./install.sh [options]
   --with-scheduler   install & enable the auto-refresh + API services
   --no-system-deps   skip apt/PostgreSQL/Node provisioning (use what's installed)
   --bootstrap        force the one-time history backfill + model training (foreground)
   --bootstrap-bg     run that backfill detached (logs to bootstrap.log)
   --no-bootstrap     skip it (default: runs in the foreground when no model exists yet)
+  --no-update        do not fast-forward to the latest commit before installing
+  --verify           run the test suite to verify the install (default: when one exists)
+  --no-verify        skip the test-suite verification
+  --reinstall        wipe .venv / node_modules / dist and rebuild (keeps the database)
 USAGE
       exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
@@ -40,6 +51,34 @@ done
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# --- self-update: fast-forward to the latest commit, then re-exec -----------
+# Runs before any work so the rest of the script (and the tests) are the newest
+# version. Only fast-forwards a clean, tracking checkout — never clobbers local
+# changes or a diverged branch. FPL_INSTALL_REEXEC guards against a re-run loop.
+if [ "$DO_UPDATE" -eq 1 ] && [ -z "${FPL_INSTALL_REEXEC:-}" ] \
+   && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+  if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+    info "Checking for updates…"
+    git fetch --quiet 2>/dev/null || warn "git fetch failed (offline?) — using the local version"
+    LOCAL="$(git rev-parse HEAD)"; REMOTE="$(git rev-parse '@{u}' 2>/dev/null || echo "$LOCAL")"
+    if [ "$LOCAL" = "$REMOTE" ]; then
+      info "Already up to date ($(git rev-parse --short HEAD))."
+    elif [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+      warn "Newer commit available but the working tree has local changes — skipping auto-update (commit/stash then re-run, or use --no-update)."
+    elif git merge-base --is-ancestor "$LOCAL" "$REMOTE" 2>/dev/null; then
+      info "Updating $(git rev-parse --short HEAD) -> $(git rev-parse --short '@{u}')"
+      if git pull --ff-only --quiet; then
+        info "Updated — re-running the new installer."
+        exec env FPL_INSTALL_REEXEC=1 bash "$0" "$@"
+      else
+        warn "git pull failed — continuing with the local version."
+      fi
+    else
+      warn "Local branch has diverged from upstream — skipping auto-update."
+    fi
+  fi
+fi
 
 # --- privilege + package manager detection ---------------------------------
 SUDO=""
@@ -166,6 +205,18 @@ if [ "$PROVISION" -eq 1 ] && { [ "$DB_HOST" = "localhost" ] || [ "$DB_HOST" = "1
   fi
 fi
 
+# --- detect an existing install + optional reinstall -----------------------
+EXISTING_INSTALL=0
+if [ -x .venv/bin/python3 ] && [ -d frontend/node_modules ]; then
+  EXISTING_INSTALL=1
+  info "Existing install detected — updating it in place (use --reinstall to rebuild from scratch)."
+fi
+if [ "$REINSTALL" -eq 1 ]; then
+  info "Reinstall: wiping .venv / node_modules / dist (database left intact)"
+  rm -rf .venv frontend/node_modules frontend/dist
+  EXISTING_INSTALL=1   # still verify afterwards
+fi
+
 # --- backend: virtualenv + deps --------------------------------------------
 if [ ! -x .venv/bin/python3 ] || ! .venv/bin/python3 -m pip --version >/dev/null 2>&1; then
   info "Creating virtualenv (.venv)"
@@ -224,6 +275,34 @@ if [ "$(node_major)" -ge 18 ] && command -v npm >/dev/null 2>&1; then
   ( cd frontend && npm install --no-audit --no-fund && npm run build )
 else
   warn "Node 18+ / npm not available — skipping frontend build. Install Node 18+, then: cd frontend && npm install && npm run build"
+fi
+
+# --- verify (existing installs) --------------------------------------------
+# After self-updating to the latest commit, run the freshly-pulled test suite
+# against the test database to confirm this install isn't hitting a known,
+# already-fixed bug. On failure we flag a reinstall rather than silently serving
+# a broken build. Defaults to running only when an install already exists (a
+# fresh install was just built+verified by pip/build); --verify / --no-verify
+# override. Uses fpl_test (conftest targets it), so it never touches app data.
+RUN_VERIFY=0
+[ "$VERIFY" = "on" ] && RUN_VERIFY=1
+[ "$VERIFY" = "auto" ] && [ "$EXISTING_INSTALL" -eq 1 ] && RUN_VERIFY=1
+if [ "$RUN_VERIFY" -eq 1 ]; then
+  if [ "$MIGRATED" -eq 1 ]; then
+    info "Verifying the install (pytest against ${DB_NAME}_test)…"
+    # Force the *_test database for the suite so it can never truncate app data,
+    # even if FPL_DATABASE_URL is exported in the shell. (Swap the db name in the
+    # configured URL, preserving host/port.)
+    if FPL_DATABASE_URL="${DB_URL%/*}/${DB_NAME}_test" pytest -q >install_verify.log 2>&1; then
+      info "Install verified — test suite passed ($(grep -oE '[0-9]+ passed' install_verify.log | tail -1))."
+    else
+      warn "Test suite FAILED — this install may be broken (see install_verify.log)."
+      warn "Try a clean rebuild: ./install.sh --reinstall"
+      tail -15 install_verify.log | sed 's/^/    /' || true
+    fi
+  else
+    warn "Skipping verification — migrations did not apply (no working database)."
+  fi
 fi
 
 # --- systemd services -------------------------------------------------------

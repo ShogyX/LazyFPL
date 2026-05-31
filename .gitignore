@@ -17,5 +17,10 @@ node_modules/
 # Generated, machine-specific systemd unit files
 deploy/
 
+# Install / bootstrap run logs
+bootstrap.log
+install_run.log
+install_verify.log
+
 # OS / editor
 .DS_Store

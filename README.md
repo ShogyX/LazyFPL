@@ -78,9 +78,18 @@ Override with `FPL_BOOTSTRAP_YEARS=N ./install.sh …`, or train the full histor
 by hand with `fpl bootstrap --all-seasons` on a larger box. Give the VM ~8GB for
 the full model; a 4GB box works but trains a slightly smaller one.
 
+Re-running it is safe and idempotent: on a git checkout it first **fast-forwards
+to the latest commit** (only when the tree is clean — never clobbering local
+changes) and re-execs the updated installer, then updates deps/migrations in
+place. When an install already exists it also **runs the freshly-pulled test
+suite** (against the `_test` database) to confirm the build isn't hitting a
+known, already-fixed bug — flagging `--reinstall` if anything fails.
+
 Flags: `--with-scheduler` (install & start services), `--no-system-deps` (skip
 apt/PostgreSQL/Node provisioning), `--bootstrap-bg` (run the backfill detached
-instead of inline), `--no-bootstrap` (skip it).
+instead of inline), `--no-bootstrap` (skip it), `--no-update` (don't auto-pull
+the latest commit), `--verify` / `--no-verify` (force/skip the test-suite check),
+`--reinstall` (wipe `.venv`/`node_modules`/`dist` and rebuild; keeps the data).
 
 Requirements it installs for you (Debian/Ubuntu): **Python 3.11+**, **Node 18+**,
 **PostgreSQL**. On other systems install those yourself, then run
