@@ -211,3 +211,15 @@ export function Hint({ children }: { children: ReactNode }) {
   return <p style={{ margin: 0, fontSize: 13, color: "var(--fg-dim)" }}>{children}</p>;
 }
 export function Eyebrow({ children }: { children: ReactNode }) { return <span className="eyebrow">{children}</span>; }
+
+// Engine confidence (0-100): green high → amber mid → red low.
+export function Conf({ v, label }: { v: number; label?: boolean }) {
+  const c = v >= 70 ? "var(--accent)" : v >= 40 ? "var(--warn)" : "var(--bad)";
+  return (
+    <span title={`Engine confidence ${v}%`} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, fontWeight: 700 }}>
+      <span style={{ width: 6, height: 6, borderRadius: 999, background: c, boxShadow: `0 0 6px ${c}` }} />
+      <span className="num" style={{ color: c }}>{v}%</span>
+      {label && <span style={{ color: "var(--fg-faint)", fontWeight: 600 }}>conf</span>}
+    </span>
+  );
+}

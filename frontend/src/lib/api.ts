@@ -48,9 +48,13 @@ export interface PlayerPrediction {
   xp_next1: number | null;
   xp_next6: number | null;
   pred_minutes: number | null;
+  confidence: number | null;
   price: number;
   status: string | null;
 }
+
+export interface ChipSlot { key: string; name: string; best_gw: number | null; half: number; ev: number; note: string }
+export interface ChipContext { season: string; gw: number; chips: ChipSlot[]; transfer_mode: string; guidance: string }
 
 export interface SquadPick {
   element_id: number;
@@ -156,7 +160,7 @@ export interface PlayerSearchResult {
   code: number | null;
   price: number;
   status: string | null;
-  predictions: Record<string, { season: string; gw: number; xp_next1: number | null; xp_next6: number | null }>;
+  predictions: Record<string, { season: string; gw: number; xp_next1: number | null; xp_next6: number | null; confidence?: number | null }>;
 }
 
 export interface TrackedEntry {
@@ -254,6 +258,7 @@ export interface PlannerResult {
     hold_net_xp: number | null;
     uplift: number | null;
   };
+  chip_context?: ChipContext | null;
 }
 
 export const api = {

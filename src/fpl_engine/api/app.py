@@ -25,8 +25,43 @@ from ..db.models import (
     tracked_picks,
     true_probabilities,
 )
-from ..optimise import SquadOptimizer, load_candidates
+from ..optimise import ChipPlanner, SquadOptimizer, half_of, load_candidates, load_horizon_candidates
 from . import analytics, live, settings_store
+
+_CHIP_NAME = {"triple_captain": "Triple Captain", "bench_boost": "Bench Boost",
+              "free_hit": "Free Hit", "wildcard": "Wildcard"}
+
+
+def _chip_note(chip: str, gw: int, value: float) -> str:
+    if chip == "triple_captain":
+        return f"Captain ceiling peaks in GW{gw} (+{value:.1f} xP from the extra multiplier)."
+    if chip == "bench_boost":
+        return f"Bench projects +{value:.1f} xP in GW{gw} — your strongest bench week (often a double)."
+    if chip == "free_hit":
+        return f"A one-week optimal XI beats your squad by +{value:.1f} xP in GW{gw} (blank/awkward week)."
+    return f"Resetting around GW{gw} captures ~+{value:.1f} xP over the next window vs holding (squad drift)."
+
+
+def _chip_schedule(roster: set[int], season: str, gw: int, horizon: int, version: str) -> dict:
+    """Collision-free chip schedule over the horizon + transfer-impact guidance."""
+    gws = list(range(gw, gw + max(horizon, 8)))
+    cands = load_horizon_candidates(season, gws, model_version=version, include_ids=roster)
+    sched = ChipPlanner().plan(cands, roster, gws, allowed_half=half_of(gw))
+    chips = [{
+        "key": k, "name": _CHIP_NAME[k], "best_gw": r.gw, "half": r.half,
+        "ev": round(r.value, 1), "note": _chip_note(k, r.gw, r.value),
+    } for k, r in sorted(sched.items(), key=lambda kv: kv[1].gw)]
+    # transfer-impact guidance for THIS gameweek
+    wc = sched.get("wildcard"); fh = sched.get("free_hit")
+    if wc and wc.gw == gw:
+        mode, guide = "wildcard", "Wildcard week — rebuild to the optimal squad (unlimited free transfers)."
+    elif fh and fh.gw == gw:
+        mode, guide = "free_hit", "Free Hit week — field a one-off optimal XI; your squad reverts next GW."
+    elif wc and wc.gw > gw:
+        mode, guide = "hold", f"Hold transfers / take small hits — Wildcard is best in GW{wc.gw}; let the squad drift toward the reset."
+    else:
+        mode, guide = "normal", "Plan transfers normally — no chip recommended this week."
+    return {"season": season, "gw": gw, "chips": chips, "transfer_mode": mode, "guidance": guide}
 
 _POS = ("GK", "DEF", "MID", "FWD")
 
@@ -70,6 +105,7 @@ def create_app() -> FastAPI:
                     "code": r.code,
                     "xp_next1": _f(r.xp_next1), "xp_next6": _f(r.xp_next6),
                     "pred_minutes": _f(r.pred_minutes),
+                    "confidence": _confidence(r.pred_minutes, r.status),
                     "price": (r.now_cost or 0) / 10, "status": r.status,
                 } for r in rows]}
 
@@ -260,7 +296,7 @@ def create_app() -> FastAPI:
             for r in rows:
                 # Latest xP for this element across stored model versions.
                 xp_stmt = (
-                    select(p.model_version, p.season, p.gw, p.xp_next1, p.xp_next6)
+                    select(p.model_version, p.season, p.gw, p.xp_next1, p.xp_next6, p.pred_minutes)
                     .where(p.element_id == r.id)
                     .order_by(p.season.desc(), p.gw.desc())
                 )
@@ -272,7 +308,8 @@ def create_app() -> FastAPI:
                         continue  # first = latest by ordering
                     preds[x.model_version] = {
                         "season": x.season, "gw": x.gw,
-                        "xp_next1": _f(x.xp_next1), "xp_next6": _f(x.xp_next6)}
+                        "xp_next1": _f(x.xp_next1), "xp_next6": _f(x.xp_next6),
+                        "confidence": _confidence(x.pred_minutes, r.status)}
                 out.append({
                     "element_id": r.id, "name": r.web_name,
                     "full_name": f"{r.first_name or ''} {r.second_name or ''}".strip(),
@@ -383,13 +420,32 @@ def create_app() -> FastAPI:
                 eo_override=eo_override, eo_weight=eo_weight)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        try:
+            chip = _chip_schedule(roster, season, gw, horizon, version)
+        except Exception:  # chip planning is advisory — never fail the planner
+            chip = None
         return {
             "entry_id": entry, "season": season, "gw": gw,
             "kind": rec.kind, "ev_uplift": _f(rec.ev),
             "confidence": _f(rec.confidence),
             "bank": (bank or 0) / 10 if bank is not None else None,
             "rationale": rec.rationale,
+            "chip_context": chip,
         }
+
+    @app.get("/chip-plan")
+    def chip_plan(entry: int, season: str, gw: int, version: str = "v1",
+                  horizon: int = Query(8, ge=1, le=20)) -> dict:
+        from ..ingest.entry import EntryIngestor
+        from ..ingest.fetch import FetchClient
+        fetch = FetchClient()
+        try:
+            roster = set(EntryIngestor(fetch).latest_roster(entry))
+        finally:
+            fetch.close()
+        if not roster:
+            raise HTTPException(404, "no tracked roster; POST /track/{entry} first")
+        return _chip_schedule(roster, season, gw, horizon, version)
 
     # ---- F4+: predicted-vs-actual analytics --------------------------------
     @app.get("/accuracy")
@@ -464,6 +520,19 @@ def _f(v) -> float | None:
 
 def _iso(v) -> str | None:
     return v.isoformat() if v is not None else None
+
+
+_AVAIL = {"a": 1.0, "d": 0.6, "i": 0.0, "s": 0.0, "u": 0.15, "n": 0.0}
+
+
+def _confidence(pred_minutes, status) -> int | None:
+    """0-100 engine confidence in a prediction. Minutes certainty dominates FPL
+    uncertainty, gated by availability status (doubtful/injured/suspended)."""
+    if pred_minutes is None:
+        return None
+    mins = max(0.0, min(1.0, float(pred_minutes) / 90.0))
+    avail = _AVAIL.get((status or "a").lower(), 1.0)
+    return round(100 * (0.25 + 0.75 * mins) * avail)
 
 
 def _player_meta(sm, ids: list[int]) -> dict[int, tuple[int | None, str | None]]:

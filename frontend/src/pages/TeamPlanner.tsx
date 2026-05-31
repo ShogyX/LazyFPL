@@ -4,8 +4,8 @@ import { ArrowRightLeft, Check, Crown, Download, Info, Shield, Sparkles } from "
 import Pitch, { type PitchPlayer } from "../components/Pitch";
 import { BarChart } from "../components/charts";
 import PlayerAvatar, { TeamBadge } from "../components/PlayerAvatar";
-import { Button, Card, CountUp, Hint, Mini, Segmented, Spinner, TextInput } from "../components/ui";
-import { api, type PlannerResult, type Squad, type TrackedDetail } from "../lib/api";
+import { Button, Card, Conf, CountUp, Hint, Mini, Segmented, Spinner, TextInput } from "../components/ui";
+import { api, type ChipContext, type PlannerResult, type Squad, type TrackedDetail } from "../lib/api";
 
 export default function TeamPlanner() {
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.settings });
@@ -113,7 +113,7 @@ function Loaded({ entryId, season, gw, version }: { entryId: number; season: str
               <>
                 <CaptainCard starters={tracked.data} preds={preds.data?.players ?? []} capId={capId} setCapId={setCapId} />
                 <TransferCard planner={planner.data} loading={planner.isLoading} error={planner.error ? String(planner.error) : null} />
-                <ChipCard season={season} gw={gw} />
+                <ChipCard ctx={planner.data?.chip_context ?? null} />
               </>
             )}
         </div>
@@ -156,7 +156,7 @@ function HeadStat({ label, children, accent, big }: { label: string; children: R
 
 // ---------- captain ----------
 function CaptainCard({ starters, preds, capId, setCapId }: {
-  starters: TrackedDetail | undefined; preds: { element_id: number; name: string; team: string | null; code: number | null; position: string | null; xp_next1: number | null }[];
+  starters: TrackedDetail | undefined; preds: { element_id: number; name: string; team: string | null; code: number | null; position: string | null; xp_next1: number | null; confidence?: number | null }[];
   capId: number | null; setCapId: (id: number) => void;
 }) {
   const xp = (id: number) => preds.find((p) => p.element_id === id)?.xp_next1 ?? 0;
@@ -192,7 +192,10 @@ function CaptainCard({ starters, preds, capId, setCapId }: {
               style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 10, textAlign: "left", padding: "8px 10px", borderRadius: 10, cursor: "pointer", border: "1px solid " + (on ? "var(--accent)" : "var(--line)"), background: on ? "var(--accent-faint)" : "var(--surface-2)" }}>
               <PlayerAvatar player={{ name: m?.name ?? "", team: m?.team, position: m?.position, code: m?.code }} size={30} ring={false} />
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontWeight: 700, fontSize: 13 }}>{m?.name}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>{m?.name}</span>
+                  {m?.confidence != null && <Conf v={m.confidence} />}
+                </div>
                 <div style={{ marginTop: 3, height: 6, position: "relative" }}>
                   <div className="mbar" style={{ position: "absolute", inset: 0 }}><i style={{ width: `${(xp(id) * 2 / ceil) * 100}%`, background: "linear-gradient(90deg, var(--line-2), var(--accent))" }} /></div>
                 </div>
@@ -252,39 +255,37 @@ function Meter({ label, value, suffix = "", decimals = 0, pct }: { label: string
   );
 }
 
-// ---------- chips (engine-informed: TC from predictions, BB/FH from DGW/blank) ----------
-function ChipCard({ season, gw }: { season: string; gw: number }) {
-  const q = useQuery({ queryKey: ["chips", season, gw], queryFn: () => api.chips(season, gw, 8), retry: false });
-  const chips = q.data?.chips ?? [];
-  const [sel, setSel] = useState("tripcap");
-  const cur = chips.find((c) => c.key === sel) ?? chips[0];
+// ---------- chips: engine schedule (TC from xP, BB/FH from DGW/blank, WC from drift) ----------
+function ChipCard({ ctx }: { ctx: ChipContext | null }) {
+  const chips = ctx?.chips ?? [];
+  const [sel, setSel] = useState<string | null>(null);
+  const cur = chips.find((c) => c.key === (sel ?? chips[0]?.key));
+  if (!ctx) return <Card title="Chip strategy"><Hint>Track this entry to plan chips.</Hint></Card>;
   return (
     <Card title="Chip strategy">
-      {q.isLoading && <Spinner />}
-      {chips.length > 0 && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-            {chips.map((c) => {
-              const on = c.key === sel;
-              return (
-                <button key={c.key} onClick={() => setSel(c.key)} className="tx" style={{ textAlign: "left", padding: "10px 11px", borderRadius: 10, cursor: "pointer", border: "1px solid " + (on ? "var(--accent)" : "var(--line)"), background: on ? "var(--accent-faint)" : "var(--surface-2)" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ fontWeight: 700, fontSize: 13 }}>{c.name}</span>
-                    {c.best_gw != null && <span className="num" style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>GW{c.best_gw}</span>}
-                  </div>
-                  {c.ev != null && <div className="num" style={{ fontSize: 11.5, color: "var(--fg-dim)", marginTop: 3 }}>+{c.ev.toFixed(1)} EV</div>}
-                </button>
-              );
-            })}
-          </div>
-          {cur && (
-            <div style={{ display: "flex", gap: 9, alignItems: "flex-start", padding: "10px 12px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--line)" }}>
-              <Sparkles size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 1 }} />
-              <p style={{ margin: 0, fontSize: 12.5, color: "var(--fg-dim)", lineHeight: 1.5 }}>{cur.note}</p>
-            </div>
-          )}
-        </>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+        {chips.map((c) => {
+          const on = c.key === (sel ?? chips[0]?.key);
+          return (
+            <button key={c.key} onClick={() => setSel(c.key)} className="tx" style={{ textAlign: "left", padding: "10px 11px", borderRadius: 10, cursor: "pointer", border: "1px solid " + (on ? "var(--accent)" : "var(--line)"), background: on ? "var(--accent-faint)" : "var(--surface-2)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontWeight: 700, fontSize: 13 }}>{c.name}</span>
+                {c.best_gw != null && <span className="num" style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>GW{c.best_gw}</span>}
+              </div>
+              <div className="num" style={{ fontSize: 11.5, color: "var(--fg-dim)", marginTop: 3 }}>+{c.ev.toFixed(1)} EV</div>
+            </button>
+          );
+        })}
+      </div>
+      {cur && (
+        <div style={{ display: "flex", gap: 9, alignItems: "flex-start", padding: "10px 12px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--line)", marginBottom: 10 }}>
+          <Sparkles size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 1 }} />
+          <p style={{ margin: 0, fontSize: 12.5, color: "var(--fg-dim)", lineHeight: 1.5 }}>{cur.note}</p>
+        </div>
       )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: ctx.transfer_mode === "normal" ? "var(--fg-faint)" : "var(--accent)" }}>
+        <ArrowRightLeft size={13} /> <span>{ctx.guidance}</span>
+      </div>
     </Card>
   );
 }
@@ -292,7 +293,7 @@ function ChipCard({ season, gw }: { season: string; gw: number }) {
 // ---------- player detail ----------
 function PlayerDetail({ elementId, season, preds, onClose }: {
   elementId: number; season: string;
-  preds: { element_id: number; name: string; team: string | null; code: number | null; position: string | null; xp_next1: number | null; xp_next6: number | null; pred_minutes: number | null; price: number; status: string | null }[];
+  preds: { element_id: number; name: string; team: string | null; code: number | null; position: string | null; xp_next1: number | null; xp_next6: number | null; pred_minutes: number | null; confidence: number | null; price: number; status: string | null }[];
   onClose: () => void;
 }) {
   const p = preds.find((x) => x.element_id === elementId);
@@ -314,10 +315,13 @@ function PlayerDetail({ elementId, season, preds, onClose }: {
               {p.status && p.status !== "a" && <span className="tag tag-warn">{p.status === "d" ? "Doubtful" : "Out"}</span>}
             </div>
           </div>
-          <div style={{ textAlign: "right" }}><div className="display num" style={{ fontSize: 24 }}>£{p.price.toFixed(1)}</div></div>
+          <div style={{ textAlign: "right" }}>
+            <div className="display num" style={{ fontSize: 24 }}>£{p.price.toFixed(1)}</div>
+            {p.confidence != null && <div style={{ marginTop: 4 }}><Conf v={p.confidence} label /></div>}
+          </div>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginBottom: 16 }}>
-          {[["xP next", p.xp_next1?.toFixed(1) ?? "—", true], ["xP 6gw", p.xp_next6?.toFixed(1) ?? "—", false], ["Pred mins", p.pred_minutes?.toFixed(0) ?? "—", false]].map(([k, v, a]) => (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginBottom: 16 }}>
+          {[["xP next", p.xp_next1?.toFixed(1) ?? "—", true], ["xP 6gw", p.xp_next6?.toFixed(1) ?? "—", false], ["Pred mins", p.pred_minutes?.toFixed(0) ?? "—", false], ["Confidence", p.confidence != null ? `${p.confidence}%` : "—", false]].map(([k, v, a]) => (
             <div key={k as string} style={{ background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: 9, padding: "9px 10px" }}>
               <div className="eyebrow" style={{ marginBottom: 3 }}>{k}</div>
               <div className="display num" style={{ fontSize: 19, color: a ? "var(--accent)" : "var(--fg)" }}>{v}</div>

@@ -3,7 +3,7 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Info, Search } from "lucide-react";
 import { BarChart, LineChart, type Series } from "../components/charts";
 import PlayerAvatar, { TeamBadge } from "../components/PlayerAvatar";
-import { Card, Chip, CountUp, Eyebrow, ErrorBox, MiniBar, Segmented, Spinner, StatTile, TextInput, Hint } from "../components/ui";
+import { Card, Chip, Conf, CountUp, Eyebrow, ErrorBox, MiniBar, Segmented, Spinner, StatTile, TextInput, Hint } from "../components/ui";
 import { SERIES } from "../lib/teams";
 import { api, type CompareRun, type HedgeWeights, type OptimalXi, type PlayerSearchResult } from "../lib/api";
 
@@ -251,16 +251,19 @@ function PlayersTab({ season }: { season: string }) {
         {search.isFetching && <Spinner />}
         <div style={{ display: "grid", gap: 4, maxHeight: 480, overflowY: "auto" }}>
           {search.data?.players.map((p) => {
-            const xp = Object.values(p.predictions)[0]?.xp_next1;
+            const latest = Object.values(p.predictions)[0];
             return (
               <button key={p.element_id} onClick={() => setSel(p)} className="tx"
                 style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 11, textAlign: "left", padding: "8px 9px", borderRadius: 10, cursor: "pointer", border: "1px solid " + (sel?.element_id === p.element_id ? "var(--accent)" : "transparent"), background: sel?.element_id === p.element_id ? "var(--accent-faint)" : "var(--surface-2)" }}>
                 <PlayerAvatar player={{ name: p.name, team: p.team, position: p.position, code: p.code }} size={34} />
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>{p.name}</span>
+                    {latest?.confidence != null && <Conf v={latest.confidence} />}
+                  </div>
                   <div style={{ fontSize: 11, color: "var(--fg-faint)", display: "flex", gap: 6, alignItems: "center" }}><TeamBadge code={p.team} size={15} /> {p.position} · £{p.price.toFixed(1)}</div>
                 </div>
-                <div className="num display" style={{ fontSize: 16, color: "var(--accent)", width: 40, textAlign: "right" }}>{xp != null ? xp.toFixed(1) : "—"}</div>
+                <div className="num display" style={{ fontSize: 16, color: "var(--accent)", width: 40, textAlign: "right" }}>{latest?.xp_next1 != null ? latest.xp_next1.toFixed(1) : "—"}</div>
               </button>
             );
           })}

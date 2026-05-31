@@ -71,40 +71,83 @@ class ChipRec:
     value: float
 
 
+ALL_CHIPS = ("triple_captain", "bench_boost", "free_hit", "wildcard")
+# Don't recommend a Wildcard before this GW — too little signal early (research:
+# first WC is best ~GW7-12 once the player/fixture landscape is clearer).
+WILDCARD_MIN_GW = 7
+
+
 class ChipPlanner:
     def __init__(self, budget: int | None = None):
         self._opt = SquadOptimizer() if budget is None else SquadOptimizer(budget=budget)
 
-    def recommend(self, candidates: list[PlayerH], roster: set[int], gws: list[int],
-                  allowed_half: int | None = None) -> dict[str, ChipRec]:
+    def grid(self, candidates: list[PlayerH], roster: set[int], gws: list[int],
+             allowed_half: int | None = None, wc_window: int = 6,
+             wc_min_gw: int = WILDCARD_MIN_GW) -> dict[str, dict[int, float]]:
+        """Per-(chip, GW) expected-value uplift over the horizon.
+
+        triple_captain = best captain xP; bench_boost = bench xP (peaks in a
+        double GW); free_hit = optimal one-week XI minus the held XI; wildcard =
+        the cumulative weekly uplift over the next ``wc_window`` GWs if you reset
+        now (a squad-drift proxy — a Wildcard captures that gap persistently).
+        """
         byid = {c.id: c for c in candidates}
         roster_players = [byid[i] for i in roster if i in byid]
         if len(roster_players) != 15:
             log.warning("chip roster not 15 players; bench/XI values approximate",
                         extra={"roster": len(roster), "in_pool": len(roster_players)})
 
-        best: dict[str, ChipRec] = {}
+        cap_g: dict[int, float] = {}
+        bench_g: dict[int, float] = {}
+        fh_g: dict[int, float] = {}
         for t, gw in enumerate(gws):
             if allowed_half is not None and half_of(gw) != allowed_half:
                 continue
-            if gw > FIRST_SET_EXPIRY_GW and allowed_half == 1:
-                continue  # first-set chips cannot be played after GW19
-
             rp = [(p.position, p.xp[t]) for p in roster_players]
             xi_xp, cap_xp, bench_xp = best_xi_value(rp)
-            roster_total = xi_xp + cap_xp  # XI incl. captain doubling
-
-            fh_cands = [Candidate(p.id, p.position, p.price, p.team_id, p.xp[t])
-                        for p in candidates]
+            roster_total = xi_xp + cap_xp
+            fh_cands = [Candidate(p.id, p.position, p.price, p.team_id, p.xp[t]) for p in candidates]
             fh = self._opt.solve(fh_cands)
-            fh_uplift = (fh.xi_xp - roster_total) if fh.feasible else 0.0
+            cap_g[gw] = round(cap_xp, 4)
+            bench_g[gw] = round(bench_xp, 4)
+            fh_g[gw] = round((fh.xi_xp - roster_total) if fh.feasible else 0.0, 4)
 
-            self._update(best, "triple_captain", gw, cap_xp)
-            self._update(best, "bench_boost", gw, bench_xp)
-            self._update(best, "free_hit", gw, fh_uplift)
-        return best
+        wc_g: dict[int, float] = {}
+        for k, gw in enumerate(gws):
+            if gw < wc_min_gw or (allowed_half is not None and half_of(gw) != allowed_half):
+                continue
+            window = [fh_g.get(g, 0.0) for g in gws[k:k + wc_window]]
+            wc_g[gw] = round(sum(max(0.0, u) for u in window), 4)
 
-    @staticmethod
-    def _update(best: dict, chip: str, gw: int, value: float) -> None:
-        if chip not in best or value > best[chip].value:
-            best[chip] = ChipRec(chip=chip, gw=gw, half=half_of(gw), value=round(value, 4))
+        return {"triple_captain": cap_g, "bench_boost": bench_g, "free_hit": fh_g, "wildcard": wc_g}
+
+    def recommend(self, candidates: list[PlayerH], roster: set[int], gws: list[int],
+                  allowed_half: int | None = None) -> dict[str, ChipRec]:
+        """Best GW per chip, independent (one chip may collide with another)."""
+        g = self.grid(candidates, roster, gws, allowed_half)
+        out: dict[str, ChipRec] = {}
+        for chip, vals in g.items():
+            if vals:
+                gw = max(vals, key=vals.get)
+                out[chip] = ChipRec(chip=chip, gw=gw, half=half_of(gw), value=vals[gw])
+        return out
+
+    def plan(self, candidates: list[PlayerH], roster: set[int], gws: list[int],
+             allowed_half: int | None = None, available: set[str] | None = None
+             ) -> dict[str, ChipRec]:
+        """Collision-free schedule: greedily assign the highest-value (chip, GW)
+        pairs so no two chips land on the same gameweek and each chip is used
+        once (FPL allows only one chip per GW)."""
+        g = self.grid(candidates, roster, gws, allowed_half)
+        avail = available if available is not None else set(ALL_CHIPS)
+        choices = sorted(
+            ((chip, gw, v) for chip in avail for gw, v in g.get(chip, {}).items() if v > 0),
+            key=lambda x: -x[2])
+        sched: dict[str, ChipRec] = {}
+        used_gw: set[int] = set()
+        for chip, gw, v in choices:
+            if chip in sched or gw in used_gw:
+                continue
+            sched[chip] = ChipRec(chip=chip, gw=gw, half=half_of(gw), value=round(v, 4))
+            used_gw.add(gw)
+        return sched
