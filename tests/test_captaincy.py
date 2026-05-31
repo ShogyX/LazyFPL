@@ -53,6 +53,20 @@ def test_reproducible_for_a_fixed_seed():
     assert a == b
 
 
+def test_rotation_risk_does_not_double_discount_appearance():
+    # The component rates already fold in expected minutes; the sampler must not
+    # re-apply the appearance discount, so a rotation player's MC EV must still
+    # track the linear xP (regression guard for the conditional-on-appear fix).
+    rot = MinutesPrediction(0.55, 0.4, 55.0, 0.7)
+    c = build_components(FWD, {"expected_goals__mean_3": 0.45,
+                               "expected_assists__mean_3": 0.2, "bonus__mean_3": 0.5},
+                         rot, CURRENT)
+    xp, _ = expected_points(c, CURRENT)
+    d = simulate(c, CURRENT, seed=11)
+    assert abs(d.ev - xp) < 0.3
+    assert d.floor == 0.0  # a real chance of a no-show
+
+
 def test_no_show_collapses_to_zero():
     dnp = ExpectedComponents(element_type=FWD, p_appear=0.0, p60=0.0, e_minutes=0.0,
                              e_goals=0.6, e_assists=0.3, e_bonus=0.5)

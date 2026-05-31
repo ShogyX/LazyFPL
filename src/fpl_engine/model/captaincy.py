@@ -78,12 +78,18 @@ def simulate(c: ExpectedComponents, rules: ScoringRules = CURRENT,
     long60 = u < c.p60
     ai = appeared.astype(int)
 
-    goals = _nb(rng, c.e_goals, _R_GOALS, n) * ai
-    assists = _nb(rng, c.e_assists, _R_ASSISTS, n) * ai
+    # The component rates already fold in the minutes projection (E over playing
+    # time), so to sample a coherent match we condition on appearance — divide by
+    # p_appear to get the per-appearance mean, then zero it on a no-show. This
+    # keeps E[counts] equal to the served rate (no double appearance discount)
+    # while still coupling "didn't play → no returns".
+    inv = 1.0 / c.p_appear if c.p_appear > 1e-9 else 0.0
+
+    goals = _nb(rng, c.e_goals * inv, _R_GOALS, n) * ai
+    assists = _nb(rng, c.e_assists * inv, _R_ASSISTS, n) * ai
 
     # On-pitch concession rate; clean sheet ⇔ none conceded while playing 60+.
-    lam = c.e_conceded / c.p_appear if c.p_appear > 1e-9 else 0.0
-    conceded = rng.poisson(max(lam, 0.0), n) * ai
+    conceded = rng.poisson(max(c.e_conceded * inv, 0.0), n) * ai
     clean = (conceded == 0) & long60
 
     pts = np.where(long60, rules.appearance_long,
@@ -93,7 +99,7 @@ def simulate(c: ExpectedComponents, rules: ScoringRules = CURRENT,
     pts += rules.clean_sheet.get(et, 0) * clean
 
     if et == GK:
-        saves = rng.poisson(max(c.e_saves, 0.0), n) * ai
+        saves = rng.poisson(max(c.e_saves * inv, 0.0), n) * ai
         pts += saves // rules.saves_per_point
     if et in (GK, DEF):
         pts -= conceded // rules.conceded_per_minus
@@ -104,9 +110,9 @@ def simulate(c: ExpectedComponents, rules: ScoringRules = CURRENT,
         pts += rules.dc_points * ((rng.random(n) < p_dc) & long60)
 
     if c.e_bonus > 0:
-        pts += np.minimum(rng.poisson(c.e_bonus, n), 3) * ai
+        pts += np.minimum(rng.poisson(c.e_bonus * inv, n), 3) * ai
     if c.e_yellow > 0:
-        pts += rules.yellow * ((rng.random(n) < min(1.0, c.e_yellow)) * ai)
+        pts += rules.yellow * ((rng.random(n) < min(1.0, c.e_yellow * inv)) * ai)
 
     return CaptainDist(
         ev=round(float(pts.mean()), 3),
